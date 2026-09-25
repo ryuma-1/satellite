@@ -1,0 +1,65 @@
+name: 🐛 バグ報告
+description: 不具合や意図しない挙動を報告する
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        バグ報告ありがとうございます。
+        できるだけ詳細に記入していただけると、調査・修正がスムーズに進みます。
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何が起きているのか、一言で分かるように説明してください
+      placeholder: 例）ログイン後にトップページが白画面になる
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: 再現手順
+      description: 発生条件・再現手順を順番に記載してください
+      placeholder: |
+        1. ◯◯ページにアクセスする
+        2. ◯◯ボタンをクリックする
+        3. ◯◯を入力する
+        4. エラーが発生する
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する結果
+      description: 本来どのような挙動になるべきかを記載してください
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の結果
+      description: 実際に発生している挙動を記載してください
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots-logs
+    attributes:
+      label: 参考情報
+      description: あれば添付してください（画面キャプチャ、ログ、スタックトレース、構造図など）
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 備考・関連Issue/PR
+      description: 関連するIssueやPRへのリンク、補足情報があれば記載してください
+    validations:
+      required: false
