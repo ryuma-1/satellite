@@ -23,6 +23,8 @@ export interface CalendarEventView {
   location?: string;
   /** Owning account nickname, when multiple accounts are configured. */
   account?: string;
+  /** Id of the calendar the event belongs to, when multiple calendars are configured. */
+  calendarId?: string;
 }
 
 /**
@@ -40,6 +42,7 @@ export function toEventView(event: CalendarEvent): CalendarEventView {
   if (event.description !== undefined) view.description = event.description;
   if (event.location !== undefined) view.location = event.location;
   if (event.account !== undefined) view.account = event.account;
+  if (event.calendarId !== undefined) view.calendarId = event.calendarId;
   return view;
 }
 
@@ -71,20 +74,48 @@ function accountShape(accounts: string[], purpose: string): AccountShape {
 }
 
 /**
+ * Schema shape for the optional `calendarId` argument.
+ */
+type CalendarIdShape = { calendarId: z.ZodOptional<z.ZodEnum<Record<string, string>>> };
+
+/**
+ * Builds the optional `calendarId` argument.
+ * It is omitted when at most the default calendar is configured, since there is then nothing to disambiguate.
+ */
+function calendarIdShape(calendarIds: string[], purpose: string): CalendarIdShape {
+  if (calendarIds.length <= 1) {
+    // Typed as present so tool inputs infer `calendarId: string | undefined`; an absent key reads as undefined.
+    return {} as CalendarIdShape;
+  }
+  return {
+    calendarId: z
+      .enum(calendarIds as [string, ...string[]])
+      .optional()
+      .describe(purpose),
+  };
+}
+
+/**
  * Wraps CalendarService as AI SDK tools (design_doc §5.3), instead of exposing the MCP server's tools directly.
  * @param accounts Account nicknames from mcp_config.json; offered to the LLM as the allowed `account` values.
+ * @param calendarIds All configured calendar ids (including the default calendar); offered to the LLM as the
+ * allowed `calendarId` values.
  */
-export function createCalendarTools(service: CalendarService, accounts: string[]): ToolSet {
+export function createCalendarTools(service: CalendarService, accounts: string[], calendarIds: string[]): ToolSet {
   const targetAccount = accountShape(
     accounts,
     "Account that owns the event. Use the `account` value returned by list_events.",
+  );
+  const targetCalendar = calendarIdShape(
+    calendarIds,
+    "Calendar that owns the event. Use the `calendarId` value returned by list_events.",
   );
 
   return {
     list_events: tool({
       description:
-        "List calendar events in a time range, merged across all accounts and sorted by start. " +
-        "Returns event ids needed by update_event and delete_event.",
+        "List calendar events in a time range, merged across all accounts and configured calendars, " +
+        "and sorted by start. Returns event ids needed by update_event and delete_event.",
       inputSchema: z.object({
         from: z.string().optional().describe(`Only events ending after this instant. ${DATE_TIME_HINT}`),
         to: z.string().optional().describe(`Only events starting before this instant. ${DATE_TIME_HINT}`),
@@ -110,6 +141,7 @@ export function createCalendarTools(service: CalendarService, accounts: string[]
         description: z.string().optional().describe("Notes"),
         location: z.string().optional().describe("Location"),
         ...accountShape(accounts, `Account to create the event in. Defaults to "${accounts[0]}".`),
+        ...calendarIdShape(calendarIds, `Calendar to create the event in. Defaults to "${calendarIds[0]}".`),
       }),
       execute: async (input) => {
         const event = await service.createEvent({
@@ -120,6 +152,7 @@ export function createCalendarTools(service: CalendarService, accounts: string[]
           description: input.description,
           location: input.location,
           account: input.account,
+          calendarId: input.calendarId,
         });
         return toEventView(event);
       },
@@ -131,6 +164,7 @@ export function createCalendarTools(service: CalendarService, accounts: string[]
       inputSchema: z.object({
         id: z.string().describe("Event id from list_events"),
         ...targetAccount,
+        ...targetCalendar,
         title: z.string().optional().describe("New title"),
         start: z.string().optional().describe(`New start. ${DATE_TIME_HINT}`),
         end: z.string().optional().describe(`New end (exclusive). ${DATE_TIME_HINT}`),
@@ -138,7 +172,7 @@ export function createCalendarTools(service: CalendarService, accounts: string[]
         description: z.string().optional().describe("New notes"),
         location: z.string().optional().describe("New location"),
       }),
-      execute: async ({ id, account, ...fields }) => {
+      execute: async ({ id, account, calendarId, ...fields }) => {
         const patch: CalendarEventPatch = {};
         if (fields.title !== undefined) patch.title = fields.title;
         if (fields.start !== undefined) patch.start = parseDateInput(fields.start, "start");
@@ -146,7 +180,7 @@ export function createCalendarTools(service: CalendarService, accounts: string[]
         if (fields.allDay !== undefined) patch.allDay = fields.allDay;
         if (fields.description !== undefined) patch.description = fields.description;
         if (fields.location !== undefined) patch.location = fields.location;
-        return toEventView(await service.updateEvent(id, patch, account));
+        return toEventView(await service.updateEvent(id, patch, account, calendarId));
       },
     }),
 
@@ -155,9 +189,10 @@ export function createCalendarTools(service: CalendarService, accounts: string[]
       inputSchema: z.object({
         id: z.string().describe("Event id from list_events"),
         ...targetAccount,
+        ...targetCalendar,
       }),
-      execute: async ({ id, account }) => {
-        await service.deleteEvent(id, account);
+      execute: async ({ id, account, calendarId }) => {
+        await service.deleteEvent(id, account, calendarId);
         return { deleted: true, id };
       },
     }),

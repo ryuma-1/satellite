@@ -27,8 +27,9 @@ export interface McpEvent {
 /**
  * Converts a server event into the shared CalendarEvent model.
  * @param account Nickname of the account the event was fetched from, when multiple accounts are configured.
+ * @param calendarId Id of the calendar the event was fetched from, when multiple calendars are configured.
  */
-export function toCalendarEvent(raw: unknown, account?: string): CalendarEvent {
+export function toCalendarEvent(raw: unknown, account?: string, calendarId?: string): CalendarEvent {
   if (!isMcpEvent(raw)) {
     throw new Error(`Unexpected event shape from calendar MCP server: ${JSON.stringify(raw)}`);
   }
@@ -44,6 +45,7 @@ export function toCalendarEvent(raw: unknown, account?: string): CalendarEvent {
   if (raw.description !== undefined) event.description = raw.description;
   if (raw.location !== undefined) event.location = raw.location;
   if (account !== undefined) event.account = account;
+  if (calendarId !== undefined) event.calendarId = calendarId;
   return event;
 }
 

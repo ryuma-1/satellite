@@ -16,6 +16,11 @@ export interface McpServerConfig {
    * Empty when the server is used with a single, unnamed account.
    */
   accounts: string[];
+  /**
+   * Additional calendar ids (e.g. sub or shared calendars) served alongside each account's default calendar.
+   * Empty when only the default calendar is used.
+   */
+  calendarIds: string[];
 }
 
 /**
@@ -98,6 +103,14 @@ export function parseMcpConfig(
       throw new Error(`${where}.accounts must not contain duplicates`);
     }
 
+    const calendarIds = server.calendarIds ?? [];
+    if (!Array.isArray(calendarIds) || !calendarIds.every((c) => typeof c === "string" && c.length > 0)) {
+      throw new Error(`${where}.calendarIds must be an array of non-empty strings`);
+    }
+    if (new Set(calendarIds).size !== calendarIds.length) {
+      throw new Error(`${where}.calendarIds must not contain duplicates`);
+    }
+
     mcpServers[name] = {
       command: server.command,
       args: args.map((a) => expandValue(a, env, `${where}.args`)),
@@ -108,6 +121,7 @@ export function parseMcpConfig(
         ]),
       ),
       accounts,
+      calendarIds,
     };
   }
 

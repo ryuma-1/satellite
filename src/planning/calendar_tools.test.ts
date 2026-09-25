@@ -34,14 +34,14 @@ class FakeCalendar implements CalendarService {
   }
 
   /** Records the call and returns the canned event. */
-  async updateEvent(id: string, patch: CalendarEventPatch, account?: string): Promise<CalendarEvent> {
-    this.calls.push({ method: "updateEvent", args: [id, patch, account] });
+  async updateEvent(id: string, patch: CalendarEventPatch, account?: string, calendarId?: string): Promise<CalendarEvent> {
+    this.calls.push({ method: "updateEvent", args: [id, patch, account, calendarId] });
     return this.event;
   }
 
   /** Records the call. */
-  async deleteEvent(id: string, account?: string): Promise<void> {
-    this.calls.push({ method: "deleteEvent", args: [id, account] });
+  async deleteEvent(id: string, account?: string, calendarId?: string): Promise<void> {
+    this.calls.push({ method: "deleteEvent", args: [id, account, calendarId] });
   }
 }
 
@@ -93,7 +93,7 @@ describe("toEventView", () => {
 describe("createCalendarTools", () => {
   test("list_events parses the range and returns views", async () => {
     const calendar = new FakeCalendar(timedEvent);
-    const tools = createCalendarTools(calendar, []);
+    const tools = createCalendarTools(calendar, [], []);
 
     const result = await run(tools, "list_events", {
       from: "2026-09-25T00:00:00+09:00",
@@ -109,20 +109,20 @@ describe("createCalendarTools", () => {
 
   test("list_events without a range passes undefined bounds", async () => {
     const calendar = new FakeCalendar(timedEvent);
-    await run(createCalendarTools(calendar, []), "list_events", {});
+    await run(createCalendarTools(calendar, [], []), "list_events", {});
     expect(calendar.calls[0]?.args[0]).toEqual({ from: undefined, to: undefined });
   });
 
   test("rejects unparseable dates with a message the LLM can act on", async () => {
     const calendar = new FakeCalendar(timedEvent);
-    const tools = createCalendarTools(calendar, []);
+    const tools = createCalendarTools(calendar, [], []);
     await expect(run(tools, "list_events", { from: "next friday" })).rejects.toThrow(/from.*ISO 8601/);
     expect(calendar.calls).toHaveLength(0);
   });
 
   test("create_event converts dates and forwards the account", async () => {
     const calendar = new FakeCalendar(timedEvent);
-    const tools = createCalendarTools(calendar, ["personal", "school"]);
+    const tools = createCalendarTools(calendar, ["personal", "school"], []);
 
     await run(tools, "create_event", {
       title: "Lunch",
@@ -138,9 +138,24 @@ describe("createCalendarTools", () => {
     expect(created.account).toBe("school");
   });
 
+  test("create_event forwards the calendarId", async () => {
+    const calendar = new FakeCalendar(timedEvent);
+    const tools = createCalendarTools(calendar, [], ["primary", "work@example.com"]);
+
+    await run(tools, "create_event", {
+      title: "Lunch",
+      start: "2026-09-26T12:00:00+09:00",
+      end: "2026-09-26T13:00:00+09:00",
+      calendarId: "work@example.com",
+    });
+
+    const created = calendar.calls[0]?.args[0] as NewCalendarEvent;
+    expect(created.calendarId).toBe("work@example.com");
+  });
+
   test("update_event sends only the provided fields", async () => {
     const calendar = new FakeCalendar(timedEvent);
-    const tools = createCalendarTools(calendar, ["personal"]);
+    const tools = createCalendarTools(calendar, ["personal"], []);
 
     await run(tools, "update_event", { id: "evt1", account: "personal", start: "2026-09-25T16:00:00+09:00" });
 
@@ -151,22 +166,51 @@ describe("createCalendarTools", () => {
     expect((patch as CalendarEventPatch).start?.toISOString()).toBe("2026-09-25T07:00:00.000Z");
   });
 
+  test("update_event forwards the calendarId", async () => {
+    const calendar = new FakeCalendar(timedEvent);
+    const tools = createCalendarTools(calendar, [], ["primary", "work@example.com"]);
+
+    await run(tools, "update_event", { id: "evt1", calendarId: "work@example.com", title: "Renamed" });
+
+    const [, , , calendarId] = calendar.calls[0]?.args ?? [];
+    expect(calendarId).toBe("work@example.com");
+  });
+
   test("delete_event forwards id and account", async () => {
     const calendar = new FakeCalendar(timedEvent);
-    const result = await run(createCalendarTools(calendar, ["personal"]), "delete_event", {
+    const result = await run(createCalendarTools(calendar, ["personal"], []), "delete_event", {
       id: "evt1",
       account: "personal",
     });
-    expect(calendar.calls[0]).toEqual({ method: "deleteEvent", args: ["evt1", "personal"] });
+    expect(calendar.calls[0]).toEqual({ method: "deleteEvent", args: ["evt1", "personal", undefined] });
     expect(result).toEqual({ deleted: true, id: "evt1" });
+  });
+
+  test("delete_event forwards the calendarId", async () => {
+    const calendar = new FakeCalendar(timedEvent);
+    const tools = createCalendarTools(calendar, [], ["primary", "work@example.com"]);
+    await run(tools, "delete_event", { id: "evt1", calendarId: "work@example.com" });
+    expect(calendar.calls[0]).toEqual({ method: "deleteEvent", args: ["evt1", undefined, "work@example.com"] });
   });
 
   test("account argument is offered only when accounts are configured", () => {
     const propertiesOf = (accounts: string[]) => {
-      const schema = createCalendarTools(new FakeCalendar(timedEvent), accounts).delete_event?.inputSchema;
+      const schema = createCalendarTools(new FakeCalendar(timedEvent), accounts, []).delete_event?.inputSchema;
       return (z.toJSONSchema(schema as z.ZodType) as { properties: Record<string, unknown> }).properties;
     };
     expect(propertiesOf([])).not.toHaveProperty("account");
     expect(propertiesOf(["personal", "school"]).account).toMatchObject({ enum: ["personal", "school"] });
+  });
+
+  test("calendarId argument is offered only when more than the default calendar is configured", () => {
+    const propertiesOf = (calendarIds: string[]) => {
+      const schema = createCalendarTools(new FakeCalendar(timedEvent), [], calendarIds).delete_event?.inputSchema;
+      return (z.toJSONSchema(schema as z.ZodType) as { properties: Record<string, unknown> }).properties;
+    };
+    expect(propertiesOf([])).not.toHaveProperty("calendarId");
+    expect(propertiesOf(["primary"])).not.toHaveProperty("calendarId");
+    expect(propertiesOf(["primary", "work@example.com"]).calendarId).toMatchObject({
+      enum: ["primary", "work@example.com"],
+    });
   });
 });

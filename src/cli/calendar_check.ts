@@ -20,7 +20,10 @@ async function main() {
 
   const connection = await McpConnection.connect(server);
   try {
-    const calendar = new GoogleCalendarAdapter(connection, { accounts: server.accounts });
+    const calendar = new GoogleCalendarAdapter(connection, {
+      accounts: server.accounts,
+      calendarIds: server.calendarIds,
+    });
     const from = new Date();
     from.setHours(0, 0, 0, 0);
     const to = new Date(from);
@@ -36,7 +39,8 @@ async function main() {
         ? `${e.start.toLocaleDateString()} (終日)`
         : `${e.start.toLocaleString()} - ${e.end.toLocaleTimeString()}`;
       const account = e.account ? `[${e.account}] ` : "";
-      console.log(`${when}  ${account}${e.title}${e.location ? ` @ ${e.location}` : ""}`);
+      const calendarId = e.calendarId ? `(${e.calendarId}) ` : "";
+      console.log(`${when}  ${account}${calendarId}${e.title}${e.location ? ` @ ${e.location}` : ""}`);
     }
   } finally {
     await connection.close();

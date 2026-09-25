@@ -1,4 +1,4 @@
-import { GoogleCalendarAdapter } from "./adapters/google-calendar/adapter";
+import { DEFAULT_CALENDAR_ID, GoogleCalendarAdapter } from "./adapters/google-calendar/adapter";
 import { loadMcpConfig } from "./config/mcp_config";
 import { createModel } from "./llm/model";
 import { McpConnection } from "./mcp/client";
@@ -26,11 +26,15 @@ async function main() {
 
   const connection = await McpConnection.connect(server);
   try {
-    const calendar = new GoogleCalendarAdapter(connection, { accounts: server.accounts });
+    const calendarIds = [DEFAULT_CALENDAR_ID, ...server.calendarIds];
+    const calendar = new GoogleCalendarAdapter(connection, {
+      accounts: server.accounts,
+      calendarIds: server.calendarIds,
+    });
     const answer = runAgent({
       model,
-      tools: createCalendarTools(calendar, server.accounts),
-      instructions: buildSystemPrompt(new Date(), server.accounts),
+      tools: createCalendarTools(calendar, server.accounts, calendarIds),
+      instructions: buildSystemPrompt(new Date(), server.accounts, calendarIds),
       prompt: question,
       onToolError: (toolName, error) => {
         console.error(`[tool ${toolName}] ${error instanceof Error ? error.message : String(error)}`);

@@ -21,17 +21,24 @@ export interface CalendarEvent {
    * Undefined when the service is not configured with multiple accounts.
    */
   account?: string;
+  /**
+   * Id of the calendar the event belongs to (e.g. a sub or shared calendar).
+   * Undefined when the service is only configured with its default calendar.
+   */
+  calendarId?: string;
 }
 
 /**
- * Input for creating an event. `allDay` defaults to false; `account` defaults to the service's default account.
+ * Input for creating an event. `allDay` defaults to false; `account` defaults to the service's default account;
+ * `calendarId` defaults to the service's default calendar.
  */
 export type NewCalendarEvent = Omit<CalendarEvent, "id" | "allDay"> & { allDay?: boolean };
 
 /**
- * Fields that can be changed on an existing event. The owning account cannot be changed by an update.
+ * Fields that can be changed on an existing event. The owning account and calendar cannot be changed by an update;
+ * use `calendarId` on `updateEvent` only to locate the event, not to move it.
  */
-export type CalendarEventPatch = Partial<Omit<CalendarEvent, "id" | "account">>;
+export type CalendarEventPatch = Partial<Omit<CalendarEvent, "id" | "account" | "calendarId">>;
 
 /**
  * Filter for listing events. Both bounds are optional so callers can query open-ended ranges.
@@ -53,9 +60,10 @@ export interface CalendarService {
   createEvent(event: NewCalendarEvent): Promise<CalendarEvent>;
   /**
    * Applies a partial update and returns the updated event.
-   * `account` should be the value from the listed event; event ids are only unique within an account.
+   * `account`/`calendarId` should be the values from the listed event; event ids are only unique within an
+   * account/calendar pair.
    */
-  updateEvent(id: string, patch: CalendarEventPatch, account?: string): Promise<CalendarEvent>;
-  /** Deletes the event with the given id. `account` has the same meaning as in updateEvent. */
-  deleteEvent(id: string, account?: string): Promise<void>;
+  updateEvent(id: string, patch: CalendarEventPatch, account?: string, calendarId?: string): Promise<CalendarEvent>;
+  /** Deletes the event with the given id. `account`/`calendarId` have the same meaning as in updateEvent. */
+  deleteEvent(id: string, account?: string, calendarId?: string): Promise<void>;
 }

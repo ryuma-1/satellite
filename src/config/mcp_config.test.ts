@@ -16,6 +16,7 @@ describe("parseMcpConfig", () => {
           },
           bare: { command: "echo" },
           multi: { command: "bunx", accounts: ["personal", "school"] },
+          calendars: { command: "bunx", calendarIds: ["work@example.com", "family@group.calendar.google.com"] },
         },
       },
       { FLAG: "on", CREDS_PATH: "/secure/creds.json" },
@@ -26,9 +27,11 @@ describe("parseMcpConfig", () => {
       args: ["pkg", "--flag=on"],
       env: { CREDS: "/secure/creds.json", TOKEN: join(homedir(), ".config/satellite/t.json") },
       accounts: [],
+      calendarIds: [],
     });
-    expect(config.mcpServers.bare).toEqual({ command: "echo", args: [], env: {}, accounts: [] });
+    expect(config.mcpServers.bare).toEqual({ command: "echo", args: [], env: {}, accounts: [], calendarIds: [] });
     expect(config.mcpServers.multi?.accounts).toEqual(["personal", "school"]);
+    expect(config.mcpServers.calendars?.calendarIds).toEqual(["work@example.com", "family@group.calendar.google.com"]);
   });
 
   test("throws on undefined variables instead of substituting empty string", () => {
@@ -50,6 +53,15 @@ describe("parseMcpConfig", () => {
     );
     expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", accounts: ["a", "a"] } } }, {})).toThrow(
       "accounts must not contain duplicates",
+    );
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", calendarIds: [1] } } }, {})).toThrow(
+      "calendarIds must be an array of non-empty strings",
+    );
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", calendarIds: [""] } } }, {})).toThrow(
+      "calendarIds must be an array of non-empty strings",
+    );
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", calendarIds: ["c", "c"] } } }, {})).toThrow(
+      "calendarIds must not contain duplicates",
     );
   });
 });

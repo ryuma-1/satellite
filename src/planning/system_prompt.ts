@@ -4,11 +4,14 @@ import { formatLocalDateTime } from "./datetime";
  * Builds the system prompt (design_doc §6.2).
  * The current time is embedded up front because nearly every calendar request is relative ("tomorrow", "this week"),
  * and computing it via a tool round-trip would be wasteful.
+ * @param calendarIds All configured calendar ids (including the default); mentioned to the LLM only when there is
+ * more than one, since a single calendar needs no disambiguation.
  * @param timeZone IANA zone name; injectable so tests do not depend on the host setting.
  */
 export function buildSystemPrompt(
   now: Date,
   accounts: string[],
+  calendarIds: string[] = [],
   timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone,
 ): string {
   const weekday = now.toLocaleDateString("ja-JP", { weekday: "long", timeZone });
@@ -24,6 +27,11 @@ export function buildSystemPrompt(
   if (accounts.length > 0) {
     lines.push(
       `- 利用できるアカウント: ${accounts.join(", ")}（予定の作成先を指定しない場合は ${accounts[0]}）`,
+    );
+  }
+  if (calendarIds.length > 1) {
+    lines.push(
+      `- 利用できるカレンダー: ${calendarIds.join(", ")}（予定の作成先を指定しない場合は ${calendarIds[0]}）`,
     );
   }
   return lines.join("\n");

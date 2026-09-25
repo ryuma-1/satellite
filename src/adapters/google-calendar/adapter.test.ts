@@ -156,7 +156,7 @@ describe("GoogleCalendarAdapter with multiple accounts", () => {
       return { events: [] };
     });
     await expect(new GoogleCalendarAdapter(caller, { accounts }).listEvents()).rejects.toThrow(
-      "list-events failed for 1 account(s):\nschool: token expired",
+      "list-events failed for 1 account/calendar pair(s):\nschool/primary: token expired",
     );
   });
 
@@ -210,5 +210,79 @@ describe("GoogleCalendarAdapter with multiple accounts", () => {
   test("rejects an account when none are configured", async () => {
     const adapter = new GoogleCalendarAdapter(new FakeCaller({ success: true }));
     await expect(adapter.deleteEvent("e", "school")).rejects.toThrow("no accounts are configured");
+  });
+});
+
+describe("GoogleCalendarAdapter with multiple calendars", () => {
+  const calendarIds = ["work@example.com"];
+
+  /**
+   * Builds a list-events response with one timed event starting at the given ISO time.
+   */
+  const listResponse = (id: string, start: string, end: string) => ({
+    events: [{ id, summary: id, start: { dateTime: start }, end: { dateTime: end } }],
+  });
+
+  test("listEvents queries every calendar and tags events with calendarId", async () => {
+    const caller = new FakeCaller((_: string, args: Record<string, unknown>) =>
+      args.calendarId === "primary"
+        ? listResponse("p1", "2026-09-24T12:00:00Z", "2026-09-24T13:00:00Z")
+        : listResponse("w1", "2026-09-24T09:00:00Z", "2026-09-24T10:00:00Z"),
+    );
+    const events = await new GoogleCalendarAdapter(caller, { calendarIds }).listEvents();
+
+    expect(caller.calls.map((c) => c.args)).toEqual([
+      { calendarId: "primary" },
+      { calendarId: "work@example.com" },
+    ]);
+    expect(events.map((e) => [e.id, e.calendarId])).toEqual([
+      ["w1", "work@example.com"],
+      ["p1", "primary"],
+    ]);
+  });
+
+  test("createEvent defaults to the primary calendar and tags an explicit one", async () => {
+    const caller = new FakeCaller({ event: timedEvent });
+    const defaulted = await new GoogleCalendarAdapter(caller, { calendarIds }).createEvent({
+      title: "x",
+      start: new Date("2026-09-24T01:00:00Z"),
+      end: new Date("2026-09-24T02:00:00Z"),
+    });
+    expect(caller.calls[0]?.args.calendarId).toBe("primary");
+    expect(defaulted.calendarId).toBe("primary");
+
+    const explicit = await new GoogleCalendarAdapter(caller, { calendarIds }).createEvent({
+      title: "x",
+      start: new Date("2026-09-24T01:00:00Z"),
+      end: new Date("2026-09-24T02:00:00Z"),
+      calendarId: "work@example.com",
+    });
+    expect(caller.calls[1]?.args.calendarId).toBe("work@example.com");
+    expect(explicit.calendarId).toBe("work@example.com");
+  });
+
+  test("updateEvent/deleteEvent target an explicit calendarId", async () => {
+    const updateCaller = new FakeCaller({ event: timedEvent });
+    const updated = await new GoogleCalendarAdapter(updateCaller, { calendarIds }).updateEvent(
+      "e",
+      { title: "x" },
+      undefined,
+      "work@example.com",
+    );
+    expect(updateCaller.calls[0]?.args).toMatchObject({ calendarId: "work@example.com", eventId: "e" });
+    expect(updated.calendarId).toBe("work@example.com");
+
+    const deleteCaller = new FakeCaller({ success: true });
+    await new GoogleCalendarAdapter(deleteCaller, { calendarIds }).deleteEvent("e", undefined, "work@example.com");
+    expect(deleteCaller.calls[0]?.args.calendarId).toBe("work@example.com");
+  });
+
+  test("rejects unknown calendarIds without calling the server", async () => {
+    const caller = new FakeCaller({ event: timedEvent });
+    const adapter = new GoogleCalendarAdapter(caller, { calendarIds });
+    await expect(adapter.updateEvent("e", { title: "x" }, undefined, "other@example.com")).rejects.toThrow(
+      'Unknown calendarId "other@example.com"',
+    );
+    expect(caller.calls).toHaveLength(0);
   });
 });

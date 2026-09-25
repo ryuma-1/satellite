@@ -29,6 +29,11 @@ describe("toCalendarEvent", () => {
     expect(toCalendarEvent(fixture.events[0])).not.toHaveProperty("account");
   });
 
+  test("tags the event with the given calendarId", () => {
+    expect(toCalendarEvent(fixture.events[0], undefined, "work@example.com").calendarId).toBe("work@example.com");
+    expect(toCalendarEvent(fixture.events[0])).not.toHaveProperty("calendarId");
+  });
+
   test("uses an empty title when summary is missing", () => {
     const event = toCalendarEvent({ id: "x", start: { date: "2026-01-01" }, end: { date: "2026-01-02" } });
     expect(event.title).toBe("");
