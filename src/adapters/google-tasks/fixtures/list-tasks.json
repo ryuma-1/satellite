@@ -1,0 +1,19 @@
+{
+  "count": 2,
+  "tasks": [
+    {
+      "id": "task_open_001",
+      "title": "Buy milk",
+      "status": "needsAction",
+      "notes": "2%, not whole",
+      "due": "2026-09-30T00:00:00.000Z"
+    },
+    {
+      "id": "task_done_002",
+      "title": "Submit report",
+      "status": "completed",
+      "completed": "2026-09-20T04:00:00.000Z"
+    }
+  ],
+  "has_more": false
+}

@@ -11,6 +11,15 @@
         "GOOGLE_OAUTH_CREDENTIALS": "${GOOGLE_OAUTH_CREDENTIALS}",
         "GOOGLE_CALENDAR_MCP_TOKEN_PATH": "~/.config/satellite/google-calendar-tokens.json"
       }
+    },
+    "tasks": {
+      "command": "bunx",
+      "args": ["@girmmy/google-tasks-mcp-server@1.0.3"],
+      "taskListIds": ["your-task-list-id"],
+      "env": {
+        "GOOGLE_TASKS_CLIENT_SECRET": "${GOOGLE_OAUTH_CREDENTIALS}",
+        "GOOGLE_TASKS_TOKEN_PATH": "~/.config/satellite/google-tasks-tokens.json"
+      }
     }
   }
 }

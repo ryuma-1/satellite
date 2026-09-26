@@ -17,6 +17,7 @@ describe("parseMcpConfig", () => {
           bare: { command: "echo" },
           multi: { command: "bunx", accounts: ["personal", "school"] },
           calendars: { command: "bunx", calendarIds: ["work@example.com", "family@group.calendar.google.com"] },
+          tasks: { command: "bunx", taskListIds: ["work-list-id"] },
         },
       },
       { FLAG: "on", CREDS_PATH: "/secure/creds.json" },
@@ -28,13 +29,22 @@ describe("parseMcpConfig", () => {
       env: { CREDS: "/secure/creds.json", TOKEN: join(homedir(), ".config/satellite/t.json") },
       accounts: [],
       calendarIds: [],
+      taskListIds: [],
     });
-    expect(config.mcpServers.bare).toEqual({ command: "echo", args: [], env: {}, accounts: [], calendarIds: [] });
+    expect(config.mcpServers.bare).toEqual({
+      command: "echo",
+      args: [],
+      env: {},
+      accounts: [],
+      calendarIds: [],
+      taskListIds: [],
+    });
     expect(config.mcpServers.multi?.accounts).toEqual([
       { name: "personal", calendarIds: [] },
       { name: "school", calendarIds: [] },
     ]);
     expect(config.mcpServers.calendars?.calendarIds).toEqual(["work@example.com", "family@group.calendar.google.com"]);
+    expect(config.mcpServers.tasks?.taskListIds).toEqual(["work-list-id"]);
   });
 
   test("accepts an object account with its own calendarIds, alongside string shorthand accounts", () => {
@@ -115,6 +125,18 @@ describe("parseMcpConfig", () => {
         {},
       ),
     ).toThrow("calendarIds must be empty once accounts are named");
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", taskListIds: [1] } } }, {})).toThrow(
+      "taskListIds must be an array of non-empty strings",
+    );
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", taskListIds: [""] } } }, {})).toThrow(
+      "taskListIds must be an array of non-empty strings",
+    );
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", taskListIds: ["t", "t"] } } }, {})).toThrow(
+      "taskListIds must not contain duplicates",
+    );
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", taskListIds: ["@default"] } } }, {})).toThrow(
+      'taskListIds must not include "@default"',
+    );
   });
 });
 

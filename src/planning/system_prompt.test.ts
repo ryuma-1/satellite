@@ -44,6 +44,23 @@ describe("buildSystemPrompt", () => {
     ]);
     expect(prompt).not.toContain("カレンダー:");
   });
+
+  test("omits task guidance when tasks is not configured", () => {
+    const prompt = buildSystemPrompt(now, [], [], "Asia/Tokyo", [], []);
+    expect(prompt).not.toContain("list_tasks");
+    expect(prompt).not.toContain("タスクリスト:");
+  });
+
+  test("adds task tool guidance without listing task lists when only the default is configured", () => {
+    const prompt = buildSystemPrompt(now, [], [], "Asia/Tokyo", [], ["@default"]);
+    expect(prompt).toContain("list_tasks ツールで取得してください");
+    expect(prompt).not.toContain("タスクリスト:");
+  });
+
+  test("lists every task list when more than the default is configured", () => {
+    const prompt = buildSystemPrompt(now, [], [], "Asia/Tokyo", [], ["@default", "work-list"]);
+    expect(prompt).toContain("利用できるタスクリスト: @default, work-list");
+  });
 });
 
 describe("resolveAccountCalendars", () => {

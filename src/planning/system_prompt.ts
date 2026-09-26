@@ -38,6 +38,8 @@ export function resolveAccountCalendars(
  * @param timeZone IANA zone name; injectable so tests do not depend on the host setting.
  * @param accountCalendars Per-account calendar lists; used only when accounts is non-empty. Accounts with just
  * their default calendar are omitted, since there is then nothing to disambiguate for that account.
+ * @param taskListIds De-duplicated task lists (default plus configured extras); empty when the tasks server
+ * is not configured at all, in which case task-related guidance is omitted entirely.
  */
 export function buildSystemPrompt(
   now: Date,
@@ -45,6 +47,7 @@ export function buildSystemPrompt(
   calendarIds: string[] = [],
   timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone,
   accountCalendars: AccountCalendars[] = [],
+  taskListIds: string[] = [],
 ): string {
   const weekday = now.toLocaleDateString("ja-JP", { weekday: "long", timeZone });
   const lines = [
@@ -69,6 +72,12 @@ export function buildSystemPrompt(
     lines.push(
       `- 利用できるカレンダー: ${calendarIds.join(", ")}（予定の作成先を指定しない場合は ${calendarIds[0]}）`,
     );
+  }
+  if (taskListIds.length > 0) {
+    lines.push("- タスクの情報が必要なときは，list_tasks ツールで取得してください．");
+    if (taskListIds.length > 1) {
+      lines.push(`- 利用できるタスクリスト: ${taskListIds.join(", ")}`);
+    }
   }
   return lines.join("\n");
 }

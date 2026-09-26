@@ -36,6 +36,12 @@ export interface McpServerConfig {
    * at parse time) when `accounts` is empty; once accounts are named, each owns its calendars instead.
    */
   calendarIds: string[];
+  /**
+   * Additional task list ids read alongside the default list ("@default"), for a tasks server.
+   * Ignored by servers that are not tasks servers (e.g. calendar); tasks has no `accounts` concept,
+   * so this is always relative to the server's single account.
+   */
+  taskListIds: string[];
 }
 
 /**
@@ -48,6 +54,12 @@ const ACCOUNT_NAME = /^[a-z0-9_-]{1,64}$/;
  * because the default calendar is always queried anyway; listing it again would fetch its events twice.
  */
 const PRIMARY_CALENDAR_ID = "primary";
+
+/**
+ * Google Tasks' identifier for a user's default task list. Rejected wherever extra task list ids are
+ * configured, for the same reason PRIMARY_CALENDAR_ID is rejected in calendarIds.
+ */
+const DEFAULT_TASK_LIST_ID = "@default";
 
 /**
  * Parsed contents of mcp_config.json, keyed by service kind (e.g. "calendar").
@@ -139,6 +151,8 @@ export function parseMcpConfig(
       );
     }
 
+    const taskListIds = parseTaskListIds(server.taskListIds, `${where}.taskListIds`);
+
     mcpServers[name] = {
       command: server.command,
       args: args.map((a) => expandValue(a, env, `${where}.args`)),
@@ -150,6 +164,7 @@ export function parseMcpConfig(
       ),
       accounts,
       calendarIds,
+      taskListIds,
     };
   }
 
@@ -171,22 +186,39 @@ function parseAccountConfig(raw: unknown, where: string): AccountConfig {
 }
 
 /**
+ * Validates a list of "additional resource id" fields (calendarIds, taskListIds): a flat array of non-empty,
+ * unique strings that must not include `defaultId`, since the default is always queried already and listing
+ * it again would fetch it twice.
+ */
+function parseAdditionalIds(raw: unknown, where: string, defaultId: string): string[] {
+  const ids = raw ?? [];
+  if (!Array.isArray(ids) || !ids.every((c) => typeof c === "string" && c.length > 0)) {
+    throw new Error(`${where} must be an array of non-empty strings`);
+  }
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`${where} must not contain duplicates`);
+  }
+  if (ids.includes(defaultId)) {
+    throw new Error(`${where} must not include "${defaultId}", which is always included already`);
+  }
+  return ids;
+}
+
+/**
  * Validates a calendarIds array (used for both the top-level and per-account fields).
  * Rejects "primary" because the default calendar is always queried already; listing it again would be redundant
  * and would fetch its events twice.
  */
 function parseCalendarIds(raw: unknown, where: string): string[] {
-  const calendarIds = raw ?? [];
-  if (!Array.isArray(calendarIds) || !calendarIds.every((c) => typeof c === "string" && c.length > 0)) {
-    throw new Error(`${where} must be an array of non-empty strings`);
-  }
-  if (new Set(calendarIds).size !== calendarIds.length) {
-    throw new Error(`${where} must not contain duplicates`);
-  }
-  if (calendarIds.includes(PRIMARY_CALENDAR_ID)) {
-    throw new Error(`${where} must not include "${PRIMARY_CALENDAR_ID}", which is always included already`);
-  }
-  return calendarIds;
+  return parseAdditionalIds(raw, where, PRIMARY_CALENDAR_ID);
+}
+
+/**
+ * Validates a taskListIds array (the tasks server's counterpart to calendarIds).
+ * Rejects "@default" because the default task list is always queried already.
+ */
+function parseTaskListIds(raw: unknown, where: string): string[] {
+  return parseAdditionalIds(raw, where, DEFAULT_TASK_LIST_ID);
 }
 
 /**
