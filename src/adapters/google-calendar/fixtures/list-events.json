@@ -1,0 +1,27 @@
+{
+  "events": [
+    {
+      "id": "evt_timed_001",
+      "summary": "Team sync",
+      "description": "Weekly sync",
+      "location": "Room A",
+      "start": { "dateTime": "2026-09-24T10:00:00+09:00", "timeZone": "Asia/Tokyo" },
+      "end": { "dateTime": "2026-09-24T11:00:00+09:00", "timeZone": "Asia/Tokyo" },
+      "startDayOfWeek": "Thursday",
+      "endDayOfWeek": "Thursday",
+      "status": "confirmed",
+      "htmlLink": "https://www.google.com/calendar/event?eid=example1",
+      "calendarId": "primary"
+    },
+    {
+      "id": "evt_allday_002",
+      "summary": "Holiday",
+      "start": { "date": "2026-09-25" },
+      "end": { "date": "2026-09-26" },
+      "status": "confirmed",
+      "calendarId": "primary"
+    }
+  ],
+  "totalCount": 2,
+  "calendars": ["primary"]
+}

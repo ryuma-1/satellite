@@ -1,0 +1,70 @@
+name: 🔧 リファクタリング
+description: コードの品質・保守性・パフォーマンスなどの改善を提案する
+title: "[Refactor] "
+labels:
+  - refactor
+body:
+  - type: markdown
+    attributes:
+      value: |
+        リファクタリング提案ありがとうございます。
+        対象範囲と改善理由を明確にしていただけると、レビューがしやすくなります。
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何をリファクタリングしたいのか、一言で分かるように説明してください
+      placeholder: 例）◯◯モジュールの重複コードを共通化したい
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景・現状の課題
+      description: 現状のコードのどこに問題があるのか（可読性、重複、密結合、パフォーマンスなど）を記載してください
+      placeholder: 例）同じロジックが3ファイルに重複しており、修正時に漏れが発生しやすい
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する結果
+      description: リファクタリング後にどのような状態になってほしいかを記載してください
+      placeholder: 例）共通処理を1箇所に集約し、テストで担保された状態にする
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 対象範囲
+      description: 影響するファイル・モジュール・機能などを記載してください
+    validations:
+      required: false
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: 注意点・リスク
+      description: 既存の挙動への影響や、動作確認が必要な箇所があれば記載してください
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots-logs
+    attributes:
+      label: 参考情報
+      description: あれば添付してください（画面キャプチャ、ログ、スタックトレース、構造図など）
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 備考・関連Issue/PR
+      description: 関連するIssueやPRへのリンク、補足情報があれば記載してください
+    validations:
+      required: false

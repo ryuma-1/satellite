@@ -1,0 +1,55 @@
+name: ✅ タスク
+description: 対応が必要な作業・タスクを登録する
+title: "[Task] "
+labels:
+  - task
+body:
+  - type: markdown
+    attributes:
+      value: |
+        タスクの登録ありがとうございます。
+        目的とゴールを明確にしていただけると、対応がスムーズに進みます。
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何をするタスクなのか、一言で分かるように説明してください
+      placeholder: 例）本番環境のログ監視ツールを導入する
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景・目的
+      description: なぜこのタスクが必要なのかを記載してください
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する結果（完了条件）
+      description: このタスクが完了したと言える状態を記載してください
+      placeholder: |
+        - [ ] ◯◯が設定されている
+        - [ ] ◯◯が動作確認済みである
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots-logs
+    attributes:
+      label: 参考情報
+      description: あれば添付してください（画面キャプチャ、ログ、スタックトレース、構造図など）
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 備考・関連Issue/PR
+      description: 関連するIssueやPRへのリンク、補足情報があれば記載してください
+    validations:
+      required: false
