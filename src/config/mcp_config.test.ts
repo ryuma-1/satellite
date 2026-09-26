@@ -30,8 +30,31 @@ describe("parseMcpConfig", () => {
       calendarIds: [],
     });
     expect(config.mcpServers.bare).toEqual({ command: "echo", args: [], env: {}, accounts: [], calendarIds: [] });
-    expect(config.mcpServers.multi?.accounts).toEqual(["personal", "school"]);
+    expect(config.mcpServers.multi?.accounts).toEqual([
+      { name: "personal", calendarIds: [] },
+      { name: "school", calendarIds: [] },
+    ]);
     expect(config.mcpServers.calendars?.calendarIds).toEqual(["work@example.com", "family@group.calendar.google.com"]);
+  });
+
+  test("accepts an object account with its own calendarIds, alongside string shorthand accounts", () => {
+    const config = parseMcpConfig(
+      {
+        mcpServers: {
+          calendar: {
+            command: "bunx",
+            accounts: ["normal", { name: "school", calendarIds: ["nomura.laboratory@gmail.com"] }],
+          },
+        },
+      },
+      {},
+    );
+
+    expect(config.mcpServers.calendar?.accounts).toEqual([
+      { name: "normal", calendarIds: [] },
+      { name: "school", calendarIds: ["nomura.laboratory@gmail.com"] },
+    ]);
+    expect(config.mcpServers.calendar?.calendarIds).toEqual([]);
   });
 
   test("throws on undefined variables instead of substituting empty string", () => {
@@ -49,11 +72,17 @@ describe("parseMcpConfig", () => {
       "env must be an object of strings",
     );
     expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", accounts: ["School"] } } }, {})).toThrow(
-      "accounts must be an array of names",
+      "accounts[0] must be a name matching",
+    );
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", accounts: [{ calendarIds: [] }] } } }, {})).toThrow(
+      'must be a string or an object with a "name" string',
     );
     expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", accounts: ["a", "a"] } } }, {})).toThrow(
-      "accounts must not contain duplicates",
+      "accounts must not contain duplicate names",
     );
+    expect(() =>
+      parseMcpConfig({ mcpServers: { a: { command: "x", accounts: ["a", { name: "a" }] } } }, {}),
+    ).toThrow("accounts must not contain duplicate names");
     expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", calendarIds: [1] } } }, {})).toThrow(
       "calendarIds must be an array of non-empty strings",
     );
@@ -63,6 +92,29 @@ describe("parseMcpConfig", () => {
     expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", calendarIds: ["c", "c"] } } }, {})).toThrow(
       "calendarIds must not contain duplicates",
     );
+    expect(() => parseMcpConfig({ mcpServers: { a: { command: "x", calendarIds: ["primary"] } } }, {})).toThrow(
+      'calendarIds must not include "primary"',
+    );
+    expect(() =>
+      parseMcpConfig(
+        { mcpServers: { a: { command: "x", accounts: [{ name: "school", calendarIds: ["primary"] }] } } },
+        {},
+      ),
+    ).toThrow('accounts[0].calendarIds must not include "primary"');
+    expect(() =>
+      parseMcpConfig(
+        {
+          mcpServers: {
+            a: {
+              command: "x",
+              accounts: ["personal", "school"],
+              calendarIds: ["shared@example.com"],
+            },
+          },
+        },
+        {},
+      ),
+    ).toThrow("calendarIds must be empty once accounts are named");
   });
 });
 

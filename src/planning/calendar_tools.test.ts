@@ -8,7 +8,7 @@ import type {
   ListEventsParams,
   NewCalendarEvent,
 } from "../services/calendar";
-import { createCalendarTools, toEventView } from "./calendar_tools";
+import { createCalendarTools, resolveCalendarIds, toEventView } from "./calendar_tools";
 
 /**
  * Records service calls and replies with a fixed event, mirroring FakeCaller in adapter.test.ts.
@@ -211,6 +211,63 @@ describe("createCalendarTools", () => {
     expect(propertiesOf(["primary"])).not.toHaveProperty("calendarId");
     expect(propertiesOf(["primary", "work@example.com"]).calendarId).toMatchObject({
       enum: ["primary", "work@example.com"],
+    });
+  });
+});
+
+describe("resolveCalendarIds", () => {
+  test("unions the default calendar with every account's calendar ids", () => {
+    const ids = resolveCalendarIds(
+      [
+        { name: "personal", calendarIds: ["work@example.com"] },
+        { name: "school", calendarIds: ["nomura.laboratory@gmail.com"] },
+      ],
+      [],
+      "primary",
+    );
+    expect(ids).toEqual(["primary", "work@example.com", "nomura.laboratory@gmail.com"]);
+  });
+
+  test("de-duplicates a calendar id shared by two accounts", () => {
+    const ids = resolveCalendarIds(
+      [
+        { name: "personal", calendarIds: ["shared@example.com"] },
+        { name: "school", calendarIds: ["shared@example.com"] },
+      ],
+      [],
+      "primary",
+    );
+    expect(ids).toEqual(["primary", "shared@example.com"]);
+  });
+
+  test("falls back to the unnamed calendarIds when there are no accounts", () => {
+    const ids = resolveCalendarIds([], ["work@example.com", "family@group.calendar.google.com"], "primary");
+    expect(ids).toEqual(["primary", "work@example.com", "family@group.calendar.google.com"]);
+  });
+
+  test("ignores the unnamed calendarIds once accounts are configured", () => {
+    const ids = resolveCalendarIds(
+      [{ name: "personal", calendarIds: ["work@example.com"] }],
+      ["should-be-ignored@example.com"],
+      "primary",
+    );
+    expect(ids).toEqual(["primary", "work@example.com"]);
+  });
+
+  test("the resulting calendarId enum offered to the LLM contains the union", () => {
+    const calendarIds = resolveCalendarIds(
+      [
+        { name: "personal", calendarIds: ["work@example.com"] },
+        { name: "school", calendarIds: ["nomura.laboratory@gmail.com"] },
+      ],
+      [],
+      "primary",
+    );
+    const schema = createCalendarTools(new FakeCalendar(timedEvent), ["personal", "school"], calendarIds).delete_event
+      ?.inputSchema;
+    const properties = (z.toJSONSchema(schema as z.ZodType) as { properties: Record<string, unknown> }).properties;
+    expect(properties.calendarId).toMatchObject({
+      enum: ["primary", "work@example.com", "nomura.laboratory@gmail.com"],
     });
   });
 });

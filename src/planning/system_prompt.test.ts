@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildSystemPrompt } from "./system_prompt";
+import { buildSystemPrompt, resolveAccountCalendars } from "./system_prompt";
 
 describe("buildSystemPrompt", () => {
   const now = new Date(2026, 8, 25, 9, 30, 0);
@@ -28,5 +28,45 @@ describe("buildSystemPrompt", () => {
   test("omits the calendar line with only the default calendar", () => {
     expect(buildSystemPrompt(now, [], ["primary"], "Asia/Tokyo")).not.toContain("カレンダー:");
     expect(buildSystemPrompt(now, [], [], "Asia/Tokyo")).not.toContain("カレンダー:");
+  });
+
+  test("lists per-account calendars only for accounts with extra calendars", () => {
+    const prompt = buildSystemPrompt(now, ["normal", "school"], [], "Asia/Tokyo", [
+      { name: "school", calendarIds: ["primary", "nomura.laboratory@gmail.com"] },
+    ]);
+    expect(prompt).toContain("利用できるカレンダー: school: primary, nomura.laboratory@gmail.com");
+  });
+
+  test("omits the calendar line when no account has an extra calendar", () => {
+    const prompt = buildSystemPrompt(now, ["normal", "school"], [], "Asia/Tokyo", [
+      { name: "normal", calendarIds: ["primary"] },
+      { name: "school", calendarIds: ["primary"] },
+    ]);
+    expect(prompt).not.toContain("カレンダー:");
+  });
+});
+
+describe("resolveAccountCalendars", () => {
+  test("prefixes each account's extras with the default calendar", () => {
+    const accountCalendars = resolveAccountCalendars(
+      [{ name: "school", calendarIds: ["nomura.laboratory@gmail.com"] }],
+      "primary",
+    );
+    expect(accountCalendars).toEqual([
+      { name: "school", calendarIds: ["primary", "nomura.laboratory@gmail.com"] },
+    ]);
+  });
+
+  test("omits accounts with no extra calendars", () => {
+    const accountCalendars = resolveAccountCalendars(
+      [
+        { name: "normal", calendarIds: [] },
+        { name: "school", calendarIds: ["nomura.laboratory@gmail.com"] },
+      ],
+      "primary",
+    );
+    expect(accountCalendars).toEqual([
+      { name: "school", calendarIds: ["primary", "nomura.laboratory@gmail.com"] },
+    ]);
   });
 });

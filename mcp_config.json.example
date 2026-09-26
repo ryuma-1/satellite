@@ -3,8 +3,10 @@
     "calendar": {
       "command": "bunx",
       "args": ["@cocal/google-calendar-mcp"],
-      "accounts": ["personal", "school"],
-      "calendarIds": ["your-shared-calendar-id@group.calendar.google.com"],
+      "accounts": [
+        "personal",
+        { "name": "school", "calendarIds": ["your-shared-calendar-id@group.calendar.google.com"] }
+      ],
       "env": {
         "GOOGLE_OAUTH_CREDENTIALS": "${GOOGLE_OAUTH_CREDENTIALS}",
         "GOOGLE_CALENDAR_MCP_TOKEN_PATH": "~/.config/satellite/google-calendar-tokens.json"

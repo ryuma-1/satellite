@@ -3,8 +3,8 @@ import { loadMcpConfig } from "./config/mcp_config";
 import { createModel } from "./llm/model";
 import { McpConnection } from "./mcp/client";
 import { runAgent } from "./planning/agent";
-import { createCalendarTools } from "./planning/calendar_tools";
-import { buildSystemPrompt } from "./planning/system_prompt";
+import { createCalendarTools, resolveCalendarIds } from "./planning/calendar_tools";
+import { buildSystemPrompt, resolveAccountCalendars } from "./planning/system_prompt";
 
 /**
  * Answers one natural-language request, letting the LLM call calendar tools as needed.
@@ -26,15 +26,19 @@ async function main() {
 
   const connection = await McpConnection.connect(server);
   try {
-    const calendarIds = [DEFAULT_CALENDAR_ID, ...server.calendarIds];
+    const accountNames = server.accounts.map((a) => a.name);
+    // Union across accounts (plus the unnamed calendarIds, when there are no named accounts) so the LLM
+    // is offered every calendar id it might see in list_events, regardless of which account owns it.
+    const calendarIds = resolveCalendarIds(server.accounts, server.calendarIds, DEFAULT_CALENDAR_ID);
+    const accountCalendars = resolveAccountCalendars(server.accounts, DEFAULT_CALENDAR_ID);
     const calendar = new GoogleCalendarAdapter(connection, {
       accounts: server.accounts,
       calendarIds: server.calendarIds,
     });
     const answer = runAgent({
       model,
-      tools: createCalendarTools(calendar, server.accounts, calendarIds),
-      instructions: buildSystemPrompt(new Date(), server.accounts, calendarIds),
+      tools: createCalendarTools(calendar, accountNames, calendarIds),
+      instructions: buildSystemPrompt(new Date(), accountNames, calendarIds, undefined, accountCalendars),
       prompt: question,
       onToolError: (toolName, error) => {
         console.error(`[tool ${toolName}] ${error instanceof Error ? error.message : String(error)}`);

@@ -286,3 +286,103 @@ describe("GoogleCalendarAdapter with multiple calendars", () => {
     expect(caller.calls).toHaveLength(0);
   });
 });
+
+describe("GoogleCalendarAdapter with per-account calendars", () => {
+  // Regression test for the cross-product bug: a calendar shared with only "school" must never be
+  // requested through "normal", since Google 404s that combination and would fail the whole call.
+  const perAccount = [
+    "normal",
+    { name: "school", calendarIds: ["nomura.laboratory@gmail.com"] },
+  ];
+
+  /**
+   * Builds a list-events response with one timed event starting at the given ISO time.
+   */
+  const listResponse = (id: string, start: string, end: string) => ({
+    events: [{ id, summary: id, start: { dateTime: start }, end: { dateTime: end } }],
+  });
+
+  test("listEvents queries only each account's own calendars, never the cross product", async () => {
+    const caller = new FakeCaller(() => listResponse("e", "2026-09-24T09:00:00Z", "2026-09-24T10:00:00Z"));
+    await new GoogleCalendarAdapter(caller, { accounts: perAccount }).listEvents();
+
+    expect(caller.calls.map((c) => c.args)).toEqual([
+      { account: "normal", calendarId: "primary" },
+      { account: "school", calendarId: "primary" },
+      { account: "school", calendarId: "nomura.laboratory@gmail.com" },
+    ]);
+  });
+
+  test("createEvent rejects a calendarId that belongs to a different account, before calling the server", async () => {
+    const caller = new FakeCaller({ event: timedEvent });
+    const adapter = new GoogleCalendarAdapter(caller, { accounts: perAccount });
+    await expect(
+      adapter.createEvent({
+        title: "x",
+        start: new Date("2026-09-24T01:00:00Z"),
+        end: new Date("2026-09-24T02:00:00Z"),
+        account: "normal",
+        calendarId: "nomura.laboratory@gmail.com",
+      }),
+    ).rejects.toThrow('Unknown calendarId "nomura.laboratory@gmail.com" for account "normal"');
+    expect(caller.calls).toHaveLength(0);
+  });
+
+  test("updateEvent rejects a calendarId that belongs to a different account, before calling the server", async () => {
+    const caller = new FakeCaller({ event: timedEvent });
+    const adapter = new GoogleCalendarAdapter(caller, { accounts: perAccount });
+    await expect(
+      adapter.updateEvent("e", { title: "x" }, "normal", "nomura.laboratory@gmail.com"),
+    ).rejects.toThrow('Unknown calendarId "nomura.laboratory@gmail.com" for account "normal"');
+    expect(caller.calls).toHaveLength(0);
+  });
+
+  test("deleteEvent rejects a calendarId that belongs to a different account, before calling the server", async () => {
+    const caller = new FakeCaller({ success: true });
+    const adapter = new GoogleCalendarAdapter(caller, { accounts: perAccount });
+    await expect(adapter.deleteEvent("e", "normal", "nomura.laboratory@gmail.com")).rejects.toThrow(
+      'Unknown calendarId "nomura.laboratory@gmail.com" for account "normal"',
+    );
+    expect(caller.calls).toHaveLength(0);
+  });
+
+  test("createEvent, updateEvent and deleteEvent accept a calendarId that belongs to the target account", async () => {
+    const createCaller = new FakeCaller({ event: timedEvent });
+    const created = await new GoogleCalendarAdapter(createCaller, { accounts: perAccount }).createEvent({
+      title: "x",
+      start: new Date("2026-09-24T01:00:00Z"),
+      end: new Date("2026-09-24T02:00:00Z"),
+      account: "school",
+      calendarId: "nomura.laboratory@gmail.com",
+    });
+    expect(createCaller.calls[0]?.args).toMatchObject({
+      account: "school",
+      calendarId: "nomura.laboratory@gmail.com",
+    });
+    expect(created.calendarId).toBe("nomura.laboratory@gmail.com");
+
+    const updateCaller = new FakeCaller({ event: timedEvent });
+    const updated = await new GoogleCalendarAdapter(updateCaller, { accounts: perAccount }).updateEvent(
+      "e",
+      { title: "x" },
+      "school",
+      "nomura.laboratory@gmail.com",
+    );
+    expect(updateCaller.calls[0]?.args).toMatchObject({
+      account: "school",
+      calendarId: "nomura.laboratory@gmail.com",
+    });
+    expect(updated.calendarId).toBe("nomura.laboratory@gmail.com");
+
+    const deleteCaller = new FakeCaller({ success: true });
+    await new GoogleCalendarAdapter(deleteCaller, { accounts: perAccount }).deleteEvent(
+      "e",
+      "school",
+      "nomura.laboratory@gmail.com",
+    );
+    expect(deleteCaller.calls[0]?.args).toMatchObject({
+      account: "school",
+      calendarId: "nomura.laboratory@gmail.com",
+    });
+  });
+});

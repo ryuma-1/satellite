@@ -2,6 +2,21 @@ import { join } from "node:path";
 import { configDir, expandHome } from "./paths";
 
 /**
+ * A single account served by an MCP server: its nickname, plus any calendars beyond its own default one.
+ * A plain string in mcp_config.json's `accounts` array is shorthand for `{ name, calendarIds: [] }`.
+ */
+export interface AccountConfig {
+  /** Account nickname, matching the one registered on the MCP server (e.g. via `auth <nickname>`). */
+  name: string;
+  /**
+   * Additional calendar ids (e.g. sub or shared calendars) served alongside this account's default calendar.
+   * Empty when only the default calendar is used. Calendars belong to the account they are shared with,
+   * so they cannot be queried through a different account.
+   */
+  calendarIds: string[];
+}
+
+/**
  * Launch settings for a single MCP server, after variable expansion.
  */
 export interface McpServerConfig {
@@ -12,13 +27,13 @@ export interface McpServerConfig {
   /** Extra environment variables for the server process. */
   env: Record<string, string>;
   /**
-   * Account nicknames served by this server, in priority order (the first is the default for writes).
-   * Empty when the server is used with a single, unnamed account.
+   * Accounts served by this server, in priority order (the first is the default account for writes).
+   * Empty when the server is used with a single, unnamed account (see `calendarIds` below).
    */
-  accounts: string[];
+  accounts: AccountConfig[];
   /**
-   * Additional calendar ids (e.g. sub or shared calendars) served alongside each account's default calendar.
-   * Empty when only the default calendar is used.
+   * Additional calendar ids for the server's single unnamed account. Only meaningful (and only accepted
+   * at parse time) when `accounts` is empty; once accounts are named, each owns its calendars instead.
    */
   calendarIds: string[];
 }
@@ -27,6 +42,12 @@ export interface McpServerConfig {
  * Account nickname format accepted by @cocal/google-calendar-mcp. Checked here so typos fail at startup.
  */
 const ACCOUNT_NAME = /^[a-z0-9_-]{1,64}$/;
+
+/**
+ * Google Calendar's identifier for a user's own calendar. Rejected wherever extra calendar ids are configured,
+ * because the default calendar is always queried anyway; listing it again would fetch its events twice.
+ */
+const PRIMARY_CALENDAR_ID = "primary";
 
 /**
  * Parsed contents of mcp_config.json, keyed by service kind (e.g. "calendar").
@@ -95,20 +116,27 @@ export function parseMcpConfig(
       throw new Error(`${where}.env must be an object of strings`);
     }
 
-    const accounts = server.accounts ?? [];
-    if (!Array.isArray(accounts) || !accounts.every((a) => typeof a === "string" && ACCOUNT_NAME.test(a))) {
-      throw new Error(`${where}.accounts must be an array of names matching ${ACCOUNT_NAME}`);
+    const rawAccounts = server.accounts ?? [];
+    if (!Array.isArray(rawAccounts)) {
+      throw new Error(`${where}.accounts must be an array`);
     }
-    if (new Set(accounts).size !== accounts.length) {
-      throw new Error(`${where}.accounts must not contain duplicates`);
+    const accounts = rawAccounts.map((a, i) => parseAccountConfig(a, `${where}.accounts[${i}]`));
+    const invalidIndex = accounts.findIndex((a) => !ACCOUNT_NAME.test(a.name));
+    if (invalidIndex !== -1) {
+      throw new Error(`${where}.accounts[${invalidIndex}] must be a name matching ${ACCOUNT_NAME}`);
+    }
+    if (new Set(accounts.map((a) => a.name)).size !== accounts.length) {
+      throw new Error(`${where}.accounts must not contain duplicate names`);
     }
 
-    const calendarIds = server.calendarIds ?? [];
-    if (!Array.isArray(calendarIds) || !calendarIds.every((c) => typeof c === "string" && c.length > 0)) {
-      throw new Error(`${where}.calendarIds must be an array of non-empty strings`);
-    }
-    if (new Set(calendarIds).size !== calendarIds.length) {
-      throw new Error(`${where}.calendarIds must not contain duplicates`);
+    const calendarIds = parseCalendarIds(server.calendarIds, `${where}.calendarIds`);
+    // calendarIds belongs to whichever single account is implicit; once accounts are named, it is ambiguous
+    // which one it was meant for, so the caller must move it under the owning account instead.
+    if (accounts.length > 0 && calendarIds.length > 0) {
+      throw new Error(
+        `${where}.calendarIds must be empty once accounts are named; ` +
+          `move each id under its owning account (${where}.accounts[].calendarIds)`,
+      );
     }
 
     mcpServers[name] = {
@@ -126,6 +154,39 @@ export function parseMcpConfig(
   }
 
   return { mcpServers };
+}
+
+/**
+ * Parses one `accounts` entry. A plain string is shorthand for an account with no extra calendars,
+ * so existing configs (accounts as string[]) keep working unchanged.
+ */
+function parseAccountConfig(raw: unknown, where: string): AccountConfig {
+  if (typeof raw === "string") {
+    return { name: raw, calendarIds: [] };
+  }
+  if (!isRecord(raw) || typeof raw.name !== "string") {
+    throw new Error(`${where} must be a string or an object with a "name" string`);
+  }
+  return { name: raw.name, calendarIds: parseCalendarIds(raw.calendarIds, `${where}.calendarIds`) };
+}
+
+/**
+ * Validates a calendarIds array (used for both the top-level and per-account fields).
+ * Rejects "primary" because the default calendar is always queried already; listing it again would be redundant
+ * and would fetch its events twice.
+ */
+function parseCalendarIds(raw: unknown, where: string): string[] {
+  const calendarIds = raw ?? [];
+  if (!Array.isArray(calendarIds) || !calendarIds.every((c) => typeof c === "string" && c.length > 0)) {
+    throw new Error(`${where} must be an array of non-empty strings`);
+  }
+  if (new Set(calendarIds).size !== calendarIds.length) {
+    throw new Error(`${where} must not contain duplicates`);
+  }
+  if (calendarIds.includes(PRIMARY_CALENDAR_ID)) {
+    throw new Error(`${where} must not include "${PRIMARY_CALENDAR_ID}", which is always included already`);
+  }
+  return calendarIds;
 }
 
 /**

@@ -1,18 +1,50 @@
 import { formatLocalDateTime } from "./datetime";
 
 /**
+ * An account's full calendar list (its default calendar plus its own extras), used to describe
+ * multi-calendar accounts to the LLM. Defined locally, mirroring GoogleCalendarAccount, so this module
+ * does not depend on config types.
+ */
+export interface AccountCalendars {
+  /** Account nickname. */
+  name: string;
+  /** All calendar ids configured for this account, default first. */
+  calendarIds: string[];
+}
+
+/**
+ * Builds the per-account calendar lists consumed by buildSystemPrompt's `accountCalendars` parameter: each
+ * account's default calendar plus its own extras, omitting accounts with none since there is then nothing
+ * to disambiguate for that account. Extracted so the assembly is unit-tested directly, instead of only
+ * reachable through main()'s wiring.
+ * @param accounts Configured accounts, each with its own extra calendar ids.
+ * @param defaultCalendarId Google Calendar's identifier for a user's own calendar (DEFAULT_CALENDAR_ID).
+ */
+export function resolveAccountCalendars(
+  accounts: { name: string; calendarIds: string[] }[],
+  defaultCalendarId: string,
+): AccountCalendars[] {
+  return accounts
+    .filter((a) => a.calendarIds.length > 0)
+    .map((a) => ({ name: a.name, calendarIds: [defaultCalendarId, ...a.calendarIds] }));
+}
+
+/**
  * Builds the system prompt (design_doc §6.2).
  * The current time is embedded up front because nearly every calendar request is relative ("tomorrow", "this week"),
  * and computing it via a tool round-trip would be wasteful.
- * @param calendarIds All configured calendar ids (including the default); mentioned to the LLM only when there is
- * more than one, since a single calendar needs no disambiguation.
+ * @param calendarIds All configured calendar ids (including the default); used only in unnamed-account mode
+ * (accounts is empty), and mentioned to the LLM only when there is more than one.
  * @param timeZone IANA zone name; injectable so tests do not depend on the host setting.
+ * @param accountCalendars Per-account calendar lists; used only when accounts is non-empty. Accounts with just
+ * their default calendar are omitted, since there is then nothing to disambiguate for that account.
  */
 export function buildSystemPrompt(
   now: Date,
   accounts: string[],
   calendarIds: string[] = [],
   timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone,
+  accountCalendars: AccountCalendars[] = [],
 ): string {
   const weekday = now.toLocaleDateString("ja-JP", { weekday: "long", timeZone });
   const lines = [
@@ -28,8 +60,12 @@ export function buildSystemPrompt(
     lines.push(
       `- 利用できるアカウント: ${accounts.join(", ")}（予定の作成先を指定しない場合は ${accounts[0]}）`,
     );
-  }
-  if (calendarIds.length > 1) {
+    const withExtraCalendars = accountCalendars.filter((a) => a.calendarIds.length > 1);
+    if (withExtraCalendars.length > 0) {
+      const perAccount = withExtraCalendars.map((a) => `${a.name}: ${a.calendarIds.join(", ")}`);
+      lines.push(`- 利用できるカレンダー: ${perAccount.join("，")}`);
+    }
+  } else if (calendarIds.length > 1) {
     lines.push(
       `- 利用できるカレンダー: ${calendarIds.join(", ")}（予定の作成先を指定しない場合は ${calendarIds[0]}）`,
     );

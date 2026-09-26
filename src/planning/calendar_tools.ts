@@ -81,6 +81,8 @@ type CalendarIdShape = { calendarId: z.ZodOptional<z.ZodEnum<Record<string, stri
 /**
  * Builds the optional `calendarId` argument.
  * It is omitted when at most the default calendar is configured, since there is then nothing to disambiguate.
+ * The offered ids are the union across all accounts; a given id is only valid together with the account
+ * that actually owns it (see resolveCalendarId in GoogleCalendarAdapter).
  */
 function calendarIdShape(calendarIds: string[], purpose: string): CalendarIdShape {
   if (calendarIds.length <= 1) {
@@ -96,10 +98,40 @@ function calendarIdShape(calendarIds: string[], purpose: string): CalendarIdShap
 }
 
 /**
+ * Minimal per-account shape needed to compute the calendar ids offered to the LLM. Defined locally, mirroring
+ * GoogleCalendarAccount / AccountConfig, so this module does not depend on adapter or config types.
+ */
+export interface AccountCalendarIds {
+  /** Account nickname. */
+  name: string;
+  /** Additional calendar ids configured for this account, beyond its default calendar. */
+  calendarIds: string[];
+}
+
+/**
+ * De-duplicated union of the default calendar and every configured account's calendar ids in named-account
+ * mode, or the default calendar and the given `calendarIds` in unnamed-account mode. This is the single
+ * source of truth for the `calendarId` enum offered to the LLM by createCalendarTools, mirroring how
+ * GoogleCalendarAdapter's calendarsFor treats top-level calendarIds as belonging only to the unnamed account.
+ * @param accounts Configured accounts, each with its own extra calendar ids. Empty in unnamed-account mode.
+ * @param calendarIds Extra calendar ids for the server's single unnamed account; ignored once accounts is non-empty.
+ * @param defaultCalendarId Google Calendar's identifier for a user's own calendar (DEFAULT_CALENDAR_ID).
+ */
+export function resolveCalendarIds(
+  accounts: AccountCalendarIds[],
+  calendarIds: string[],
+  defaultCalendarId: string,
+): string[] {
+  const extraIds = accounts.length > 0 ? accounts.flatMap((a) => a.calendarIds) : calendarIds;
+  return [...new Set([defaultCalendarId, ...extraIds])];
+}
+
+/**
  * Wraps CalendarService as AI SDK tools (design_doc §5.3), instead of exposing the MCP server's tools directly.
  * @param accounts Account nicknames from mcp_config.json; offered to the LLM as the allowed `account` values.
- * @param calendarIds All configured calendar ids (including the default calendar); offered to the LLM as the
- * allowed `calendarId` values.
+ * @param calendarIds De-duplicated union of the default calendar and every account's calendar ids, offered to
+ * the LLM as the allowed `calendarId` values. A given id must belong to the chosen account; the adapter rejects
+ * mismatched account/calendarId pairs.
  */
 export function createCalendarTools(service: CalendarService, accounts: string[], calendarIds: string[]): ToolSet {
   const targetAccount = accountShape(
@@ -108,7 +140,8 @@ export function createCalendarTools(service: CalendarService, accounts: string[]
   );
   const targetCalendar = calendarIdShape(
     calendarIds,
-    "Calendar that owns the event. Use the `calendarId` value returned by list_events.",
+    "Calendar that owns the event; must belong to the chosen `account`. " +
+      "Use the account/calendarId pair returned by list_events.",
   );
 
   return {
@@ -141,7 +174,10 @@ export function createCalendarTools(service: CalendarService, accounts: string[]
         description: z.string().optional().describe("Notes"),
         location: z.string().optional().describe("Location"),
         ...accountShape(accounts, `Account to create the event in. Defaults to "${accounts[0]}".`),
-        ...calendarIdShape(calendarIds, `Calendar to create the event in. Defaults to "${calendarIds[0]}".`),
+        ...calendarIdShape(
+          calendarIds,
+          `Calendar to create the event in; must belong to the chosen \`account\`. Defaults to "${calendarIds[0]}".`,
+        ),
       }),
       execute: async (input) => {
         const event = await service.createEvent({

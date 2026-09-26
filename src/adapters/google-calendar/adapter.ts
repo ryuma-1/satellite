@@ -14,6 +14,21 @@ import { toCalendarEvent, toMcpDate, toMcpDateTime } from "./mapper";
 export const DEFAULT_CALENDAR_ID = "primary";
 
 /**
+ * An account and the extra calendars it owns, as configured for GoogleCalendarAdapter.
+ * Defined locally (rather than imported from config) so the adapter does not depend on config types;
+ * it is structurally compatible with config.AccountConfig.
+ */
+export interface GoogleCalendarAccount {
+  /** Account nickname registered on the server (via `auth <nickname>`). */
+  name: string;
+  /**
+   * Additional calendar ids (e.g. sub or shared calendars) served alongside this account's default calendar.
+   * Calendars belong to the account they are shared with, so they are only ever queried through it.
+   */
+  calendarIds?: string[];
+}
+
+/**
  * Options for GoogleCalendarAdapter.
  */
 export interface GoogleCalendarAdapterOptions {
@@ -21,16 +36,17 @@ export interface GoogleCalendarAdapterOptions {
   calendarId?: string;
   /**
    * Additional calendar ids (e.g. sub or shared calendars) included alongside the default calendar.
-   * Empty by default, in which case only the default calendar is used.
+   * Used only for the server's single unnamed account, i.e. when `accounts` is empty.
    */
   calendarIds?: string[];
   /** IANA time zone forwarded to the server; the calendar's default is used when omitted. */
   timeZone?: string;
   /**
-   * Account nicknames registered on the server (via `auth <nickname>`). The first is the default for createEvent.
-   * When empty, the server's single account is used and no account argument is sent.
+   * Accounts registered on the server (via `auth <nickname>`), each with its own extra calendars.
+   * A plain string is shorthand for an account with no extra calendars. The first account is the
+   * default for createEvent. When empty, the server's single account is used and no account argument is sent.
    */
-  accounts?: string[];
+  accounts?: (string | GoogleCalendarAccount)[];
 }
 
 /**
@@ -40,7 +56,7 @@ export class GoogleCalendarAdapter implements CalendarService {
   private readonly calendarId: string;
   private readonly calendarIds: string[];
   private readonly timeZone?: string;
-  private readonly accounts: string[];
+  private readonly accounts: Required<GoogleCalendarAccount>[];
 
   /**
    * @param caller Connection used to invoke the server's tools.
@@ -52,19 +68,24 @@ export class GoogleCalendarAdapter implements CalendarService {
     this.calendarId = options.calendarId ?? DEFAULT_CALENDAR_ID;
     this.calendarIds = options.calendarIds ?? [];
     this.timeZone = options.timeZone;
-    this.accounts = options.accounts ?? [];
+    this.accounts = (options.accounts ?? []).map((a) =>
+      typeof a === "string" ? { name: a, calendarIds: [] } : { name: a.name, calendarIds: a.calendarIds ?? [] },
+    );
   }
 
   /**
    * Lists events via the "list-events" tool, once per account/calendar pair, and merges them by start time.
-   * The server's own multi-account merge is not used because it routes "primary" to only one account.
+   * Each account is only queried for its own calendars (never another account's), since a calendar shared
+   * with only one account returns a 404 when requested through any other. The server's own multi-account
+   * merge is not used because it routes "primary" to only one account.
    */
   async listEvents(params: ListEventsParams = {}): Promise<CalendarEvent[]> {
-    const accountTargets: (string | undefined)[] = this.accounts.length > 0 ? this.accounts : [undefined];
-    const calendarTargets = [this.calendarId, ...this.calendarIds];
-    const targets = accountTargets.flatMap((account) =>
-      calendarTargets.map((calendarId) => ({ account, calendarId })),
-    );
+    const targets: { account: string | undefined; calendarId: string }[] =
+      this.accounts.length > 0
+        ? this.accounts.flatMap((account) =>
+            [this.calendarId, ...account.calendarIds].map((calendarId) => ({ account: account.name, calendarId })),
+          )
+        : [this.calendarId, ...this.calendarIds].map((calendarId) => ({ account: undefined, calendarId }));
     const results = await Promise.allSettled(
       targets.map(({ account, calendarId }) => this.listEventsFor(account, calendarId, params)),
     );
@@ -89,8 +110,8 @@ export class GoogleCalendarAdapter implements CalendarService {
    * Creates an event via the "create-event" tool in event.account/event.calendarId, or their defaults.
    */
   async createEvent(event: NewCalendarEvent): Promise<CalendarEvent> {
-    const account = this.resolveAccount(event.account, this.accounts[0]);
-    const calendarId = this.resolveCalendarId(event.calendarId);
+    const account = this.resolveAccount(event.account, this.accounts[0]?.name);
+    const calendarId = this.resolveCalendarId(account, event.calendarId);
     const format = event.allDay ? toMcpDate : toMcpDateTime;
     const result = await this.caller.callTool("create-event", {
       ...this.accountArg(account),
@@ -116,7 +137,7 @@ export class GoogleCalendarAdapter implements CalendarService {
     calendarId?: string,
   ): Promise<CalendarEvent> {
     const target = this.resolveAccount(account, this.soleAccount());
-    const resolvedCalendarId = this.resolveCalendarId(calendarId);
+    const resolvedCalendarId = this.resolveCalendarId(target, calendarId);
     const format = patch.allDay ? toMcpDate : toMcpDateTime;
     const result = await this.caller.callTool("update-event", {
       ...this.accountArg(target),
@@ -143,7 +164,7 @@ export class GoogleCalendarAdapter implements CalendarService {
    */
   async deleteEvent(id: string, account?: string, calendarId?: string): Promise<void> {
     const target = this.resolveAccount(account, this.soleAccount());
-    const resolvedCalendarId = this.resolveCalendarId(calendarId);
+    const resolvedCalendarId = this.resolveCalendarId(target, calendarId);
     const result = await this.caller.callTool("delete-event", {
       ...this.accountArg(target),
       calendarId: resolvedCalendarId,
@@ -191,11 +212,12 @@ export class GoogleCalendarAdapter implements CalendarService {
       return undefined;
     }
     const account = requested ?? fallback;
+    const accountNames = this.accounts.map((a) => a.name);
     if (account === undefined) {
-      throw new Error(`An account is required; choose one of: ${this.accounts.join(", ")}`);
+      throw new Error(`An account is required; choose one of: ${accountNames.join(", ")}`);
     }
-    if (!this.accounts.includes(account)) {
-      throw new Error(`Unknown account "${account}"; configured accounts: ${this.accounts.join(", ")}`);
+    if (!accountNames.includes(account)) {
+      throw new Error(`Unknown account "${account}"; configured accounts: ${accountNames.join(", ")}`);
     }
     return account;
   }
@@ -204,28 +226,48 @@ export class GoogleCalendarAdapter implements CalendarService {
    * Returns the only configured account, which is the only safe implicit target for update/delete.
    */
   private soleAccount(): string | undefined {
-    return this.accounts.length === 1 ? this.accounts[0] : undefined;
+    return this.accounts.length === 1 ? this.accounts[0]!.name : undefined;
   }
 
   /**
-   * Validates a requested calendar id against the configured list, falling back to the default calendar
-   * when omitted. Throws on an unknown id, since guessing could modify or delete an event on the wrong calendar.
+   * Validates a requested calendar id against the calendars available to `account` (or, in unnamed mode,
+   * against the unnamed calendar list), falling back to the default calendar when omitted. Throws on an id
+   * belonging to a different account (or unknown altogether), since guessing could modify or delete the
+   * wrong calendar, and a calendar shared with only one account 404s when requested through another.
    */
-  private resolveCalendarId(requested: string | undefined): string {
+  private resolveCalendarId(account: string | undefined, requested: string | undefined): string {
     if (requested === undefined) return this.calendarId;
-    const known = [this.calendarId, ...this.calendarIds];
+    const known = this.calendarsFor(account);
     if (!known.includes(requested)) {
-      throw new Error(`Unknown calendarId "${requested}"; configured calendars: ${known.join(", ")}`);
+      const scope = account !== undefined ? `account "${account}"` : "the configured account";
+      throw new Error(`Unknown calendarId "${requested}" for ${scope}; configured calendars: ${known.join(", ")}`);
     }
     return requested;
   }
 
   /**
-   * Returns calendarId only when additional calendars are configured, keeping CalendarEventView minimal
-   * for the common single-calendar setup, mirroring how account is only tagged when accounts are configured.
+   * Returns the calendars available to `account` (its default plus its own extras), or, in unnamed mode,
+   * the default plus the unnamed extra calendars.
+   */
+  private calendarsFor(account: string | undefined): string[] {
+    if (this.accounts.length === 0) {
+      return [this.calendarId, ...this.calendarIds];
+    }
+    const found = this.accounts.find((a) => a.name === account);
+    return [this.calendarId, ...(found?.calendarIds ?? [])];
+  }
+
+  /**
+   * Returns calendarId only when some account (or, in unnamed mode, the unnamed config) has extra calendars,
+   * keeping CalendarEventView minimal for the common single-calendar setup, mirroring how account is only
+   * tagged when accounts are configured.
    */
   private taggedCalendarId(calendarId: string): string | undefined {
-    return this.calendarIds.length > 0 ? calendarId : undefined;
+    const hasExtraCalendars =
+      this.accounts.length > 0
+        ? this.accounts.some((a) => a.calendarIds.length > 0)
+        : this.calendarIds.length > 0;
+    return hasExtraCalendars ? calendarId : undefined;
   }
 
   /**
