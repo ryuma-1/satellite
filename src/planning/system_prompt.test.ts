@@ -95,6 +95,8 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("request_confirmation");
     expect(prompt).toContain("create_task");
     expect(prompt).toContain("approved: false");
+    expect(prompt).toContain("estimatedHours");
+    expect(prompt).toContain("fits: false");
   });
 
   test("omits task creation workflow guidance when tasks are not configured", () => {

@@ -1,6 +1,7 @@
 import { DEFAULT_WORKING_HOURS, type WorkingHours, type WorkingRange } from "../config/schedule_config";
 import type { CalendarEvent } from "../services/calendar";
 import type { Task } from "../services/tasks";
+import { parseEstimateHours } from "./task_estimate";
 
 /**
  * Number of candidate working days searched for a due-date candidate when the caller does not override it.
@@ -10,7 +11,8 @@ import type { Task } from "../services/tasks";
 export const DEFAULT_SEARCH_DAYS = 14;
 
 /**
- * Estimated hours a new task takes when the caller does not provide its own estimate.
+ * Estimated hours a task takes when no estimate is known: used both for a new task whose caller gives none,
+ * and for an existing task whose notes carry no estimate marker (see task_estimate.ts).
  */
 export const DEFAULT_ESTIMATED_HOURS = 1;
 
@@ -20,12 +22,6 @@ export const DEFAULT_ESTIMATED_HOURS = 1;
 const MS_PER_HOUR = 60 * 60 * 1000;
 
 /**
- * Maximum number of existing, incomplete tasks already due on a candidate day before it is skipped as
- * overloaded, regardless of how much free calendar time remains that day.
- */
-export const MAX_TASKS_PER_DAY = 3;
-
-/**
  * Inputs for suggestDueDate.
  */
 export interface SuggestDueDateInput {
@@ -33,7 +29,10 @@ export interface SuggestDueDateInput {
   now: Date;
   /** Existing calendar events, used to compute each candidate day's free time. */
   events: CalendarEvent[];
-  /** Existing tasks, used to compute each candidate day's task load. */
+  /**
+   * Existing tasks, used to compute each candidate day's task load: each incomplete task due that day
+   * consumes its estimated hours (from its notes' estimate marker, or DEFAULT_ESTIMATED_HOURS).
+   */
   tasks: Task[];
   /** Estimated hours the new task will take; defaults to DEFAULT_ESTIMATED_HOURS. */
   estimatedHours?: number;
@@ -54,6 +53,15 @@ export interface DueDateSuggestion {
   freeHours: number;
   /** Number of existing, incomplete tasks already due that day. */
   tasksDueThatDay: number;
+  /** Total estimated hours of those existing tasks. */
+  taskHours: number;
+  /** Hours still available for new work that day: freeHours minus taskHours, never below 0. */
+  remainingHours: number;
+  /**
+   * True when the new task's estimate fits within remainingHours. False only for the fallback candidate
+   * returned when no day in the search window has room, so callers can tell the user it does not fit.
+   */
+  fits: boolean;
 }
 
 /**
@@ -65,12 +73,13 @@ export interface DueDateSuggestion {
  *
  * Only working time counts as capacity: free time and sleep outside the configured working hours are never
  * scheduled into. Walks forward working day by working day, starting tomorrow (skipping days with no working
- * time), and returns
- * the first day with both enough free time (>= estimatedHours within working hours, after subtracting
- * overlapping events) and a manageable existing task load (< MAX_TASKS_PER_DAY tasks already due that day).
- * If no day within the search window satisfies both, the last day searched is returned anyway (with its own,
- * less favorable numbers): suggesting nothing would be less useful than a tight but explainable candidate,
- * and the confirmation flow (request_confirmation) still lets the user reject it.
+ * time), and returns the first day whose remaining hours (working time, minus calendar events, minus the
+ * estimated hours of existing tasks due that day) are at least the new task's estimate. For example, an
+ * 8-hour working day with no events and a 3-hour task already due has 5 hours left, so a task estimated at
+ * more than 5 hours is not placed there.
+ * If no day within the search window has room, the last day searched is returned anyway with `fits: false`:
+ * suggesting nothing would be less useful than a tight but explainable candidate, and the confirmation flow
+ * (request_confirmation) still lets the user reject it.
  */
 export function suggestDueDate(input: SuggestDueDateInput): DueDateSuggestion {
   const workingHours = input.workingHours ?? DEFAULT_WORKING_HOURS;
@@ -82,15 +91,26 @@ export function suggestDueDate(input: SuggestDueDateInput): DueDateSuggestion {
   const estimatedHours = Math.min(input.estimatedHours ?? DEFAULT_ESTIMATED_HOURS, maxDailyCapacity);
   const searchDays = input.searchDays ?? DEFAULT_SEARCH_DAYS;
   const today = startOfDay(input.now);
+  // A parent task split into subtasks is represented by those subtasks' own estimates; counting the parent
+  // as well would charge the same work twice.
+  const parentIds = new Set(input.tasks.flatMap((t) => (t.parent !== undefined ? [t.parent] : [])));
+  const countedTasks = input.tasks.filter((t) => !parentIds.has(t.id));
 
   let lastCandidate: DueDateSuggestion | undefined;
   for (const date of candidateDays(today, searchDays, workingHours)) {
+    const freeHours = freeHoursOn(date, workingHours[date.getDay()]!, input.events);
+    const dueTasks = tasksDueOn(date, countedTasks);
+    const taskHours = dueTasks.reduce((sum, t) => sum + (parseEstimateHours(t.notes) ?? DEFAULT_ESTIMATED_HOURS), 0);
+    const remainingHours = Math.max(freeHours - taskHours, 0);
     const candidate: DueDateSuggestion = {
       date,
-      freeHours: freeHoursOn(date, workingHours[date.getDay()]!, input.events),
-      tasksDueThatDay: tasksDueOn(date, input.tasks),
+      freeHours,
+      tasksDueThatDay: dueTasks.length,
+      taskHours,
+      remainingHours,
+      fits: remainingHours >= estimatedHours,
     };
-    if (candidate.freeHours >= estimatedHours && candidate.tasksDueThatDay < MAX_TASKS_PER_DAY) {
+    if (candidate.fits) {
       return candidate;
     }
     lastCandidate = candidate;
@@ -202,11 +222,11 @@ function mergeIntervals(intervals: Array<[number, number]>): Array<[number, numb
 }
 
 /**
- * Counts incomplete tasks already due on `day`. Completed tasks are excluded, since they no longer represent
+ * Returns incomplete tasks already due on `day`. Completed tasks are excluded, since they no longer represent
  * outstanding load on that day.
  */
-function tasksDueOn(day: Date, tasks: Task[]): number {
-  return tasks.filter((t) => !t.completed && t.due !== undefined && isSameLocalDay(t.due, day)).length;
+function tasksDueOn(day: Date, tasks: Task[]): Task[] {
+  return tasks.filter((t) => !t.completed && t.due !== undefined && isSameLocalDay(t.due, day));
 }
 
 /**

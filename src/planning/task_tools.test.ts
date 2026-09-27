@@ -256,6 +256,17 @@ describe("createTaskTools", () => {
       expect(result).toMatchObject({ id: "created1", title: "Write report", due: "2026-10-01", notes: "draft" });
     });
 
+    test("records estimatedHours as an estimate marker in the notes", async () => {
+      const service = new FakeTaskService([]);
+      const tools = createTaskTools(service, defaultOnly, noEvents);
+
+      await run(tools, "create_task", { title: "Write report", notes: "draft", estimatedHours: 3 });
+      await run(tools, "create_task", { title: "No notes", estimatedHours: 1.5 });
+
+      expect((service.calls[0]?.args[0] as NewTask).notes).toBe("draft\n[estimate: 3h]");
+      expect((service.calls[1]?.args[0] as NewTask).notes).toBe("[estimate: 1.5h]");
+    });
+
     test("passes parent through, to create a subtask", async () => {
       const service = new FakeTaskService([]);
       const tools = createTaskTools(service, defaultOnly, noEvents);
@@ -319,7 +330,7 @@ describe("createTaskTools", () => {
       expect(taskCall?.args[0]).toEqual({ dueAfter: range.start, dueBefore: range.end, completed: false });
       // 2026-09-25 is a Friday, so tomorrow (Sat 9/26) and Sun 9/27 are skipped; the first candidate weekday
       // is Monday 2026-09-28.
-      expect(result).toEqual({ due: "2026-09-28", freeHours: 9, tasksDueThatDay: 0 });
+      expect(result).toEqual({ due: "2026-09-28", freeHours: 9, tasksDueThatDay: 0, taskHours: 0, remainingHours: 9, fits: true });
     });
 
     test("forwards estimatedHours/searchDays to the underlying calculation", async () => {
@@ -348,7 +359,7 @@ describe("createTaskTools", () => {
       expect(range.end.getTime()).toBeLessThan(defaultRange.end.getTime());
       // ...and in the result: with only one (fully booked) candidate day in range, it is returned as the
       // fallback rather than searching further into the default 14-day window.
-      expect(result).toEqual({ due: "2026-09-28", freeHours: 0, tasksDueThatDay: 0 });
+      expect(result).toEqual({ due: "2026-09-28", freeHours: 0, tasksDueThatDay: 0, taskHours: 0, remainingHours: 0, fits: false });
     });
 
     test("schedules into the configured workingHours, for both the fetch window and the result", async () => {
@@ -363,7 +374,7 @@ describe("createTaskTools", () => {
 
       const range = computeSearchRange(fixedNow, 1, onlySaturday);
       expect(calendar.calls).toEqual([{ method: "listEvents", args: [{ from: range.start, to: range.end }] }]);
-      expect(result).toEqual({ due: "2026-09-26", freeHours: 2, tasksDueThatDay: 0 });
+      expect(result).toEqual({ due: "2026-09-26", freeHours: 2, tasksDueThatDay: 0, taskHours: 0, remainingHours: 2, fits: true });
     });
   });
 });

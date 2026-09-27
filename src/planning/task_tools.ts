@@ -5,6 +5,7 @@ import type { CalendarService } from "../services/calendar";
 import type { NewTask, Task, TaskService } from "../services/tasks";
 import { DATE_ONLY, formatLocalDate, parseDateInput } from "./datetime";
 import { DEFAULT_ESTIMATED_HOURS, DEFAULT_SEARCH_DAYS, computeSearchRange, suggestDueDate } from "./due_date_suggestion";
+import { withEstimateMarker } from "./task_estimate";
 
 /**
  * Task as returned to the LLM: the due date becomes a plain YYYY-MM-DD string so the tool result is
@@ -235,6 +236,15 @@ export function createTaskTools(
               `time-of-day, if given, is converted to local time and then discarded. ${DATE_HINT}`,
           ),
         notes: z.string().optional().describe("Notes"),
+        estimatedHours: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Estimated hours the task will take (the same value passed to suggest_due_date). Recorded in the " +
+              "task's notes so later due-date suggestions count it against that day's working time. When " +
+              "splitting into subtasks, set it on each subtask rather than on the parent.",
+          ),
         parent: z.string().optional().describe("Id of an existing task to create this task as a subtask of"),
         ...targetAccount,
         ...targetTaskListId,
@@ -243,7 +253,7 @@ export function createTaskTools(
         const task: NewTask = {
           title: input.title,
           due: input.due !== undefined ? parseDateInput(input.due, "due") : undefined,
-          notes: input.notes,
+          notes: input.estimatedHours !== undefined ? withEstimateMarker(input.notes, input.estimatedHours) : input.notes,
           parent: input.parent,
           account: input.account,
           taskListId: input.taskListId,
@@ -254,8 +264,10 @@ export function createTaskTools(
 
     suggest_due_date: tool({
       description:
-        "Suggest a reasonable due date for a new task, based on calendar availability and existing task load " +
-        "(never guess a due date yourself; call this instead when the user has not given an explicit one).",
+        "Suggest a reasonable due date for a new task: the first working day whose working time, minus calendar " +
+        "events and the estimated hours of tasks already due that day, still fits the new task's estimate " +
+        "(never guess a due date yourself; call this instead when the user has not given an explicit one). " +
+        "`fits: false` means no day in the search window has room; tell the user so when presenting the date.",
       inputSchema: z.object({
         estimatedHours: z
           .number()
@@ -287,6 +299,9 @@ export function createTaskTools(
           due: formatLocalDate(suggestion.date),
           freeHours: suggestion.freeHours,
           tasksDueThatDay: suggestion.tasksDueThatDay,
+          taskHours: suggestion.taskHours,
+          remainingHours: suggestion.remainingHours,
+          fits: suggestion.fits,
         };
       },
     }),

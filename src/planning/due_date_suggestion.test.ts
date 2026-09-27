@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { CalendarEvent } from "../services/calendar";
 import type { Task } from "../services/tasks";
 import type { WorkingHours } from "../config/schedule_config";
-import { MAX_TASKS_PER_DAY, computeSearchRange, suggestDueDate } from "./due_date_suggestion";
+import { DEFAULT_ESTIMATED_HOURS, computeSearchRange, suggestDueDate } from "./due_date_suggestion";
 
 /** Start hour of DEFAULT_WORKING_HOURS' weekday block, used when a test does not pass its own workingHours. */
 const WORKING_HOURS_START = 9;
@@ -38,9 +38,10 @@ function allDayEvent(start: Date, end: Date): CalendarEvent {
   return { id: "allday", title: "Trip", start, end, allDay: true };
 }
 
-/** Builds an incomplete task due on the given day. */
-function taskDue(day: Date, id = "t"): Task {
-  return { id, title: "Task", completed: false, due: day };
+/** Builds an incomplete task due on the given day, optionally carrying an estimate marker in its notes. */
+function taskDue(day: Date, id = "t", estimateHours?: number): Task {
+  const notes = estimateHours !== undefined ? `[estimate: ${estimateHours}h]` : undefined;
+  return { id, title: "Task", completed: false, due: day, notes };
 }
 
 describe("suggestDueDate", () => {
@@ -50,6 +51,9 @@ describe("suggestDueDate", () => {
       date: firstCandidate,
       freeHours: WORKING_HOURS_END - WORKING_HOURS_START,
       tasksDueThatDay: 0,
+      taskHours: 0,
+      remainingHours: WORKING_HOURS_END - WORKING_HOURS_START,
+      fits: true,
     });
   });
 
@@ -75,28 +79,51 @@ describe("suggestDueDate", () => {
     expect(result.date).toEqual(secondCandidate);
   });
 
-  test("skips a day already at the maximum existing task load", () => {
-    const tasks = Array.from({ length: MAX_TASKS_PER_DAY }, (_, i) => taskDue(firstCandidate, `t${i}`));
-    const result = suggestDueDate({ now, events: [], tasks });
+  test("skips a day whose existing tasks' estimates leave too little working time", () => {
+    // 9 working hours - a 5h and a 3h task = 1h left, short of a 2h estimate.
+    const tasks = [taskDue(firstCandidate, "t1", 5), taskDue(firstCandidate, "t2", 3)];
+    const result = suggestDueDate({ now, events: [], tasks, estimatedHours: 2 });
     expect(result.date).toEqual(secondCandidate);
     expect(result.tasksDueThatDay).toBe(0);
   });
 
-  test("does not skip a day one below the maximum existing task load (boundary)", () => {
-    const tasks = Array.from({ length: MAX_TASKS_PER_DAY - 1 }, (_, i) => taskDue(firstCandidate, `t${i}`));
+  test("an 8h day with a 3h task accepts exactly 5h more but not more (boundary)", () => {
+    const workingHours = withDay(1, [hours(9, 17)]);
+    const tasks = [taskDue(firstCandidate, "t1", 3)];
+    const fitting = suggestDueDate({ now, events: [], tasks, estimatedHours: 5, workingHours });
+    expect(fitting).toMatchObject({ date: firstCandidate, freeHours: 8, taskHours: 3, remainingHours: 5, fits: true });
+    const tooLarge = suggestDueDate({ now, events: [], tasks, estimatedHours: 5.5, workingHours });
+    expect(tooLarge.date).toEqual(secondCandidate);
+  });
+
+  test("subtracts both calendar events and existing task estimates", () => {
+    // 9h working - 4h meeting (9-13) - 3h task = 2h left: a 2h estimate fits, a 3h one does not.
+    const events = [timedEvent(firstCandidate, 9, 13)];
+    const tasks = [taskDue(firstCandidate, "t1", 3)];
+    expect(suggestDueDate({ now, events, tasks, estimatedHours: 2 }).date).toEqual(firstCandidate);
+    expect(suggestDueDate({ now, events, tasks, estimatedHours: 3 }).date).toEqual(secondCandidate);
+  });
+
+  test("counts an existing task without an estimate marker as DEFAULT_ESTIMATED_HOURS", () => {
+    const tasks = [taskDue(firstCandidate, "t1")];
     const result = suggestDueDate({ now, events: [], tasks });
-    expect(result.date).toEqual(firstCandidate);
-    expect(result.tasksDueThatDay).toBe(MAX_TASKS_PER_DAY - 1);
+    expect(result.taskHours).toBe(DEFAULT_ESTIMATED_HOURS);
+  });
+
+  test("does not count a parent task whose subtasks are also due, to avoid charging the same work twice", () => {
+    const parentTask = taskDue(firstCandidate, "parent", 6);
+    const subtask = { ...taskDue(firstCandidate, "sub", 2), parent: "parent" };
+    const result = suggestDueDate({ now, events: [], tasks: [parentTask, subtask] });
+    expect(result.taskHours).toBe(2);
+    expect(result.tasksDueThatDay).toBe(1);
   });
 
   test("excludes completed tasks from the day's load", () => {
-    const tasks = Array.from({ length: MAX_TASKS_PER_DAY }, (_, i) => ({
-      ...taskDue(firstCandidate, `t${i}`),
-      completed: true,
-    }));
+    const tasks = [{ ...taskDue(firstCandidate, "t1", 9), completed: true }];
     const result = suggestDueDate({ now, events: [], tasks });
     expect(result.date).toEqual(firstCandidate);
     expect(result.tasksDueThatDay).toBe(0);
+    expect(result.taskHours).toBe(0);
   });
 
   test("accepts a day whose free hours exactly meet the estimate (boundary)", () => {
@@ -140,6 +167,7 @@ describe("suggestDueDate", () => {
     const result = suggestDueDate({ now, events, tasks: [], searchDays: 3 });
     expect(result.date).toEqual(new Date(2026, 8, 30));
     expect(result.freeHours).toBe(0);
+    expect(result.fits).toBe(false);
   });
 
   test("respects a custom searchDays window", () => {
@@ -179,7 +207,7 @@ describe("suggestDueDate with custom working hours", () => {
     const workingHours = withDay(1, [hours(9, 12), hours(13, 18)]);
     const events = [timedEvent(firstCandidate, 12, 13)];
     const result = suggestDueDate({ now, events, tasks: [], workingHours });
-    expect(result).toEqual({ date: firstCandidate, freeHours: 8, tasksDueThatDay: 0 });
+    expect(result).toMatchObject({ date: firstCandidate, freeHours: 8, tasksDueThatDay: 0 });
   });
 
   test("an event spanning a break only subtracts its working-time portions", () => {
@@ -192,7 +220,7 @@ describe("suggestDueDate with custom working hours", () => {
   test("suggests a Saturday when Saturday has working time", () => {
     const saturday = new Date(2026, 8, 26);
     const result = suggestDueDate({ now, events: [], tasks: [], workingHours: withDay(6, [hours(10, 12)]) });
-    expect(result).toEqual({ date: saturday, freeHours: 2, tasksDueThatDay: 0 });
+    expect(result).toMatchObject({ date: saturday, freeHours: 2, tasksDueThatDay: 0 });
   });
 
   test("skips a weekday configured with no working time", () => {
