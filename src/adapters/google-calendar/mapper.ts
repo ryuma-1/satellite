@@ -1,9 +1,10 @@
 import type { CalendarEvent } from "../../services/calendar";
 
 /**
- * Start/end value as returned by @cocal/google-calendar-mcp (mirrors the Google Calendar API).
+ * Start/end value in Google Calendar's Event resource, as returned by `gws calendar events *`
+ * (docs/spikes/gws-cli-0.22.5.md §4: identical field names to the old MCP server's StructuredEvent).
  */
-export interface McpDateTime {
+export interface GoogleDateTime {
   /** RFC 3339 timestamp for timed events. */
   dateTime?: string;
   /** YYYY-MM-DD for all-day events. */
@@ -13,33 +14,35 @@ export interface McpDateTime {
 }
 
 /**
- * Subset of the server's StructuredEvent that the adapter consumes.
+ * Subset of Google Calendar's Event resource that the adapter consumes.
  */
-export interface McpEvent {
+export interface GoogleEvent {
   id: string;
   summary?: string;
   description?: string;
   location?: string;
-  start: McpDateTime;
-  end: McpDateTime;
+  /** "confirmed" for a normal event, "cancelled" for a deleted one (see docs/spikes/gws-cli-0.22.5.md §8). */
+  status?: string;
+  start: GoogleDateTime;
+  end: GoogleDateTime;
 }
 
 /**
- * Converts a server event into the shared CalendarEvent model.
- * @param account Nickname of the account the event was fetched from, when multiple accounts are configured.
+ * Converts a raw Event resource into the shared CalendarEvent model.
+ * @param account Nickname of the account the event was fetched from; always set once accounts are configured.
  * @param calendarId Id of the calendar the event was fetched from, when multiple calendars are configured.
  */
 export function toCalendarEvent(raw: unknown, account?: string, calendarId?: string): CalendarEvent {
-  if (!isMcpEvent(raw)) {
-    throw new Error(`Unexpected event shape from calendar MCP server: ${JSON.stringify(raw)}`);
+  if (!isGoogleEvent(raw)) {
+    throw new Error(`Unexpected event shape from gws: ${JSON.stringify(raw)}`);
   }
 
   const event: CalendarEvent = {
     id: raw.id,
     // Google allows events without a title; keep the model's title non-optional.
     title: raw.summary ?? "",
-    start: parseMcpDateTime(raw.start, `${raw.id}.start`),
-    end: parseMcpDateTime(raw.end, `${raw.id}.end`),
+    start: parseGoogleDateTime(raw.start, `${raw.id}.start`),
+    end: parseGoogleDateTime(raw.end, `${raw.id}.end`),
     allDay: raw.start.date !== undefined,
   };
   if (raw.description !== undefined) event.description = raw.description;
@@ -50,27 +53,36 @@ export function toCalendarEvent(raw: unknown, account?: string, calendarId?: str
 }
 
 /**
- * Formats a Date for the server's time arguments.
- * The server only accepts second precision, so Date#toISOString()'s milliseconds are stripped.
+ * Formats a Date as the RFC 3339 timestamp gws's timeMin/timeMax query parameters expect.
+ * Google rejects sub-second precision, so Date#toISOString()'s milliseconds are stripped.
  */
-export function toMcpDateTime(date: Date): string {
+export function toTimestamp(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 /**
- * Formats a Date as YYYY-MM-DD in local time, which is how the server expects all-day values.
+ * Builds a timed start/end value for gws's `--json` request body.
+ * @param timeZone IANA zone to attach, so the API interprets ambiguous local times correctly; omitted (rather
+ * than sent as undefined) when not configured, since toTimestamp already encodes an unambiguous UTC instant.
  */
-export function toMcpDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+export function toRfc3339(date: Date, timeZone?: string): GoogleDateTime {
+  return timeZone ? { dateTime: toTimestamp(date), timeZone } : { dateTime: toTimestamp(date) };
 }
 
 /**
- * Parses a server start/end value. All-day dates become local midnight to match toMcpDate.
+ * Builds an all-day start/end value for gws's `--json` request body, as YYYY-MM-DD in local time.
  */
-function parseMcpDateTime(value: McpDateTime, where: string): Date {
+export function toDateOnly(date: Date): GoogleDateTime {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return { date: `${y}-${m}-${d}` };
+}
+
+/**
+ * Parses a start/end value from gws. All-day dates become local midnight to match toDateOnly.
+ */
+function parseGoogleDateTime(value: GoogleDateTime, where: string): Date {
   if (value.dateTime !== undefined) {
     const parsed = new Date(value.dateTime);
     if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid dateTime at ${where}: ${value.dateTime}`);
@@ -85,9 +97,9 @@ function parseMcpDateTime(value: McpDateTime, where: string): Date {
 }
 
 /**
- * Structural check for the fields toCalendarEvent relies on.
+ * Structural check for the fields toCalendarEvent (and the adapter's get-before-replace path) rely on.
  */
-function isMcpEvent(value: unknown): value is McpEvent {
+export function isGoogleEvent(value: unknown): value is GoogleEvent {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return (

@@ -1,188 +1,185 @@
 import { describe, expect, test } from "bun:test";
-import type { McpToolCaller } from "../../mcp/client";
+import type { GwsCaller, GwsRequest } from "../../gws/runner";
 import { GoogleTasksAdapter } from "./adapter";
+import emptyFixture from "./fixtures/list-empty-tasks.json";
 import fixture from "./fixtures/list-tasks.json";
 
 /**
- * Computes a fake response from the tool call, so multi-page/multi-list tests can answer per call.
+ * Computes a fake response from the call, so multi-page/multi-account/multi-list tests can answer per call.
  */
-type Responder = (name: string, args: Record<string, unknown>) => unknown;
+type Responder = (account: string, req: GwsRequest) => unknown;
 
 /**
- * Records tool calls and replies with a canned or computed response, mirroring the calendar adapter's
- * FakeCaller.
+ * Records gws calls and replies with a canned or computed response, mirroring the calendar adapter's FakeCaller.
  */
-class FakeCaller implements McpToolCaller {
+class FakeCaller implements GwsCaller {
   /** Every call made through this caller, in order, for assertions on what the adapter requested. */
-  readonly calls: { name: string; args: Record<string, unknown> }[] = [];
+  readonly calls: { account: string; req: GwsRequest }[] = [];
 
   /**
    * @param response Value returned from every call, or a Responder computing it per call.
    */
   constructor(private readonly response: unknown) {}
 
-  /**
-   * Records the call and returns the response. A thrown Responder error becomes a rejection.
-   */
-  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-    this.calls.push({ name, args });
-    return typeof this.response === "function" ? (this.response as Responder)(name, args) : this.response;
+  /** Not used by GoogleTasksAdapter (list always pages), but required by the GwsCaller interface. */
+  async call(account: string, req: GwsRequest): Promise<unknown> {
+    this.calls.push({ account, req });
+    return this.respond(account, req);
+  }
+
+  /** Records the call and returns the response, wrapped as a single page unless it is already one page per call. */
+  async callAllPages(account: string, req: GwsRequest): Promise<unknown[]> {
+    this.calls.push({ account, req });
+    const result = this.respond(account, req);
+    return Array.isArray(result) ? result : [result];
+  }
+
+  private respond(account: string, req: GwsRequest): unknown {
+    return typeof this.response === "function" ? (this.response as Responder)(account, req) : this.response;
   }
 }
 
 describe("GoogleTasksAdapter", () => {
   test("listTasks queries the default list with the fixed fetch flags", async () => {
     const caller = new FakeCaller(fixture);
-    const tasks = await new GoogleTasksAdapter(caller).listTasks();
+    const tasks = await new GoogleTasksAdapter(caller, { accounts: ["acct"] }).listTasks();
 
     expect(caller.calls).toEqual([
       {
-        name: "google_tasks_list_tasks",
-        args: { tasklist_id: "@default", limit: 100, show_completed: true, show_deleted: false, show_hidden: false },
+        account: "acct",
+        req: {
+          path: ["tasks", "tasks", "list"],
+          params: { tasklist: "@default", showCompleted: true, showDeleted: false, showHidden: false },
+        },
       },
     ]);
-    expect(tasks.map((t) => t.id)).toEqual(["task_open_001", "task_done_002"]);
-    expect(tasks[0]?.taskListId).toBeUndefined();
+    expect(tasks.map((t) => [t.id, t.account, t.taskListId])).toEqual([
+      ["task_open_001", "acct", undefined],
+      ["task_done_002", "acct", undefined],
+    ]);
   });
 
-  test("listTasks forwards dueAfter/dueBefore as due_min/due_max", async () => {
-    const caller = new FakeCaller({ tasks: [], has_more: false });
-    await new GoogleTasksAdapter(caller).listTasks({
+  test("listTasks forwards dueAfter/dueBefore as dueMin/dueMax", async () => {
+    const caller = new FakeCaller({ items: [] });
+    await new GoogleTasksAdapter(caller, { accounts: ["acct"] }).listTasks({
       dueAfter: new Date(2026, 8, 24),
       dueBefore: new Date(2026, 8, 30),
     });
 
-    expect(caller.calls[0]?.args).toMatchObject({
-      due_min: "2026-09-24T00:00:00.000Z",
-      due_max: "2026-09-30T00:00:00.000Z",
+    expect(caller.calls[0]?.req.params).toMatchObject({
+      dueMin: "2026-09-24T00:00:00.000Z",
+      dueMax: "2026-09-30T00:00:00.000Z",
     });
   });
 
-  test("listTasks rounds due_max up to the next day for a timed dueBefore, so that day's tasks aren't excluded", async () => {
-    const timed = new FakeCaller({ tasks: [], has_more: false });
-    await new GoogleTasksAdapter(timed).listTasks({ dueBefore: new Date(2026, 8, 30, 15, 0, 0) });
-    expect(timed.calls[0]?.args.due_max).toBe("2026-10-01T00:00:00.000Z");
+  test("listTasks rounds dueMax up to the next day for a timed dueBefore, so that day's tasks aren't excluded", async () => {
+    const timed = new FakeCaller({ items: [] });
+    await new GoogleTasksAdapter(timed, { accounts: ["acct"] }).listTasks({ dueBefore: new Date(2026, 8, 30, 15, 0, 0) });
+    expect(timed.calls[0]?.req.params?.dueMax).toBe("2026-10-01T00:00:00.000Z");
 
     // An exact local midnight is left as-is: "before 2026-09-30 00:00" still excludes the 30th entirely.
-    const midnight = new FakeCaller({ tasks: [], has_more: false });
-    await new GoogleTasksAdapter(midnight).listTasks({ dueBefore: new Date(2026, 8, 30) });
-    expect(midnight.calls[0]?.args.due_max).toBe("2026-09-30T00:00:00.000Z");
+    const midnight = new FakeCaller({ items: [] });
+    await new GoogleTasksAdapter(midnight, { accounts: ["acct"] }).listTasks({ dueBefore: new Date(2026, 8, 30) });
+    expect(midnight.calls[0]?.req.params?.dueMax).toBe("2026-09-30T00:00:00.000Z");
   });
 
   test("listTasks filters by completion state client-side, after fetching every task", async () => {
     const caller = new FakeCaller(fixture);
-    const completed = await new GoogleTasksAdapter(caller).listTasks({ completed: true });
+    const completed = await new GoogleTasksAdapter(caller, { accounts: ["acct"] }).listTasks({ completed: true });
     expect(completed.map((t) => t.id)).toEqual(["task_done_002"]);
 
-    // The server is still asked for everything (show_completed: true), since it has no "completed only" mode.
-    expect(caller.calls[0]?.args).toMatchObject({ show_completed: true });
+    // gws is still asked for everything (showCompleted: true), since it has no "completed only" mode.
+    expect(caller.calls[0]?.req.params).toMatchObject({ showCompleted: true });
   });
 
-  test("listTasks follows next_page_token until has_more is false", async () => {
-    const caller = new FakeCaller((_: string, args: Record<string, unknown>) =>
-      args.page_token === undefined
-        ? { tasks: [{ id: "t1", title: "First", status: "needsAction" }], has_more: true, next_page_token: "p2" }
-        : { tasks: [{ id: "t2", title: "Second", status: "needsAction" }], has_more: false },
-    );
-    const tasks = await new GoogleTasksAdapter(caller).listTasks();
-
-    expect(caller.calls.map((c) => c.args.page_token)).toEqual([undefined, "p2"]);
+  test("listTasks merges every NDJSON page", async () => {
+    const caller = new FakeCaller([
+      { items: [{ id: "t1", title: "First", status: "needsAction" }], nextPageToken: "p2" },
+      { items: [{ id: "t2", title: "Second", status: "needsAction" }] },
+    ]);
+    const tasks = await new GoogleTasksAdapter(caller, { accounts: ["acct"] }).listTasks();
     expect(tasks.map((t) => t.id)).toEqual(["t1", "t2"]);
   });
 
+  test("listTasks treats a page with no items key as an empty list, not an error", async () => {
+    const caller = new FakeCaller(emptyFixture);
+    const tasks = await new GoogleTasksAdapter(caller, { accounts: ["acct"] }).listTasks();
+    expect(tasks).toEqual([]);
+  });
+
   test("listTasks fails loudly on unexpected response", async () => {
-    const adapter = new GoogleTasksAdapter(new FakeCaller("plain text"));
-    await expect(adapter.listTasks()).rejects.toThrow('unexpected response for task list "@default"');
+    const adapter = new GoogleTasksAdapter(new FakeCaller("plain text"), { accounts: ["acct"] });
+    await expect(adapter.listTasks()).rejects.toThrow('unexpected response for acct/@default');
   });
 
-  test("listTasks retries with a smaller limit instead of silently dropping tasks the server truncated", async () => {
-    const seenLimits: number[] = [];
-    const caller = new FakeCaller((_: string, args: Record<string, unknown>) => {
-      seenLimits.push(args.limit as number);
-      // The server would otherwise truncate down to a slice of `items` with no way to recover the rest,
-      // so a large limit keeps failing until the adapter asks for few enough tasks to fit.
-      if ((args.limit as number) > 25) {
-        return {
-          tasks: [{ id: "dropped", title: "Dropped", status: "needsAction" }],
-          has_more: true,
-          truncation_message: "Response truncated; narrow with a smaller limit or filters.",
-        };
-      }
-      return { tasks: [{ id: "kept", title: "Kept", status: "needsAction" }], has_more: false };
-    });
+  test("requires at least one account", () => {
+    expect(() => new GoogleTasksAdapter(new FakeCaller({}), { accounts: [] })).toThrow(
+      "requires at least one account",
+    );
+  });
+});
 
-    const tasks = await new GoogleTasksAdapter(caller).listTasks();
+describe("GoogleTasksAdapter with multiple accounts", () => {
+  const accounts = ["personal", "school"];
 
-    expect(tasks.map((t) => t.id)).toEqual(["kept"]);
-    expect(seenLimits[0]).toBe(100);
-    expect(seenLimits[seenLimits.length - 1]).toBeLessThanOrEqual(25);
+  /** Builds a single-task list-tasks response for the given id. */
+  const listResponse = (id: string, title: string) => ({ items: [{ id, title, status: "needsAction" }] });
+
+  test("listTasks queries every account and tags tasks with account", async () => {
+    const caller = new FakeCaller((account: string) =>
+      account === "personal" ? listResponse("p1", "Personal task") : listResponse("s1", "School task"),
+    );
+    const tasks = await new GoogleTasksAdapter(caller, { accounts }).listTasks();
+
+    expect(caller.calls.map((c) => c.account)).toEqual(["personal", "school"]);
+    expect(tasks.map((t) => [t.id, t.account])).toEqual([
+      ["p1", "personal"],
+      ["s1", "school"],
+    ]);
   });
 
-  test("listTasks retries a page truncated alongside a real next_page_token, instead of skipping its tasks", async () => {
-    const caller = new FakeCaller((_: string, args: Record<string, unknown>) => {
-      if (args.page_token === undefined) {
-        if ((args.limit as number) > 1) {
-          return {
-            tasks: [{ id: "dropped", title: "Dropped", status: "needsAction" }],
-            has_more: true,
-            next_page_token: "p2",
-            truncation_message: "Response truncated; narrow with a smaller limit or filters.",
-          };
-        }
-        return { tasks: [{ id: "kept", title: "Kept", status: "needsAction" }], has_more: true, next_page_token: "p2" };
-      }
-      return { tasks: [{ id: "t2", title: "Second page", status: "needsAction" }], has_more: false };
+  test("listTasks names every failing account instead of returning partial results", async () => {
+    const caller = new FakeCaller((account: string) => {
+      if (account === "school") throw new Error("token expired");
+      return listResponse("p1", "Personal task");
     });
-
-    const tasks = await new GoogleTasksAdapter(caller).listTasks();
-
-    expect(tasks.map((t) => t.id)).toEqual(["kept", "t2"]);
-  });
-
-  test("listTasks fails loudly when a page keeps truncating even at the minimum limit", async () => {
-    const caller = new FakeCaller({
-      tasks: [{ id: "t1", title: "T1", status: "needsAction" }],
-      has_more: true,
-      truncation_message: "Response truncated; narrow with a smaller limit or filters.",
-    });
-
-    await expect(new GoogleTasksAdapter(caller).listTasks()).rejects.toThrow(
-      "kept truncating its response even at limit=1",
+    await expect(new GoogleTasksAdapter(caller, { accounts }).listTasks()).rejects.toThrow(
+      "school/@default: token expired",
     );
   });
 });
 
 describe("GoogleTasksAdapter with multiple task lists", () => {
-  const taskListIds = ["work-list"];
+  const perAccount = ["normal", { name: "school", taskListIds: ["work-list"] }];
 
-  /**
-   * Builds a single-task list-tasks response for the given id.
-   */
-  const listResponse = (id: string, title: string) => ({
-    tasks: [{ id, title, status: "needsAction" }],
-    has_more: false,
-  });
+  /** Builds a single-task list-tasks response for the given id. */
+  const listResponse = (id: string, title: string) => ({ items: [{ id, title, status: "needsAction" }] });
 
-  test("listTasks queries every task list and tags tasks with taskListId", async () => {
-    const caller = new FakeCaller((_: string, args: Record<string, unknown>) =>
-      args.tasklist_id === "@default" ? listResponse("d1", "Default task") : listResponse("w1", "Work task"),
+  test("listTasks queries every task list and tags tasks with taskListId only where extras are configured", async () => {
+    const caller = new FakeCaller((_account: string, req: GwsRequest) =>
+      req.params?.tasklist === "@default" ? listResponse("d1", "Default task") : listResponse("w1", "Work task"),
     );
-    const tasks = await new GoogleTasksAdapter(caller, { taskListIds }).listTasks();
+    const tasks = await new GoogleTasksAdapter(caller, { accounts: perAccount }).listTasks();
 
-    expect(caller.calls.map((c) => c.args.tasklist_id)).toEqual(["@default", "work-list"]);
-    expect(tasks.map((t) => [t.id, t.taskListId])).toEqual([
-      ["d1", "@default"],
-      ["w1", "work-list"],
+    expect(caller.calls.map((c) => [c.account, c.req.params?.tasklist])).toEqual([
+      ["normal", "@default"],
+      ["school", "@default"],
+      ["school", "work-list"],
+    ]);
+    expect(tasks.map((t) => [t.id, t.account, t.taskListId])).toEqual([
+      ["d1", "normal", undefined],
+      ["d1", "school", "@default"],
+      ["w1", "school", "work-list"],
     ]);
   });
 
   test("listTasks names every failing task list instead of returning partial results", async () => {
-    const caller = new FakeCaller((_: string, args: Record<string, unknown>) => {
-      if (args.tasklist_id === "work-list") throw new Error("not found");
+    const caller = new FakeCaller((_account: string, req: GwsRequest) => {
+      if (req.params?.tasklist === "work-list") throw new Error("not found");
       return listResponse("d1", "Default task");
     });
-    await expect(new GoogleTasksAdapter(caller, { taskListIds }).listTasks()).rejects.toThrow(
-      "google_tasks_list_tasks failed for 1 task list(s):\nwork-list: not found",
+    await expect(new GoogleTasksAdapter(caller, { accounts: perAccount }).listTasks()).rejects.toThrow(
+      "school/work-list: not found",
     );
   });
 });

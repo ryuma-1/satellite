@@ -18,6 +18,8 @@ export interface TaskView {
   completed: boolean;
   /** Free-form notes. */
   notes?: string;
+  /** Owning account nickname, always set once accounts are configured (mirrors CalendarEventView.account). */
+  account?: string;
   /** Id of the task list the task belongs to, when multiple task lists are configured. */
   taskListId?: string;
 }
@@ -33,19 +35,35 @@ export function toTaskView(task: Task): TaskView {
   };
   if (task.due !== undefined) view.due = formatLocalDate(task.due);
   if (task.notes !== undefined) view.notes = task.notes;
+  if (task.account !== undefined) view.account = task.account;
   if (task.taskListId !== undefined) view.taskListId = task.taskListId;
   return view;
 }
 
 /**
- * De-duplicated list of the default task list and every configured extra task list id.
- * Mirrors resolveCalendarIds's role for calendarId: the single source of truth for which task lists a
- * GoogleTasksAdapter (or its callers) query.
- * @param taskListIds Extra task list ids beyond the default (mcp_config.json's tasks.taskListIds).
+ * An account's full task list set (its default list plus its own extras), used to describe multi-list
+ * accounts to the LLM. Defined locally, mirroring GoogleTasksAccount, so this module does not depend on
+ * adapter or config types (same rationale as calendar_tools.ts's AccountCalendarIds).
+ */
+export interface AccountTaskLists {
+  /** Account nickname. */
+  name: string;
+  /** All task list ids configured for this account, default first. */
+  taskListIds: string[];
+}
+
+/**
+ * Builds the per-account task list sets consumed by createTaskTools and buildSystemPrompt: each account's
+ * default task list plus its own extras. Mirrors resolveCalendarIds/resolveAccountCalendars's role for
+ * calendars: the single source of truth for which task lists a GoogleTasksAdapter (or its callers) query.
+ * @param accounts Configured accounts, each with its own extra task list ids beyond the default.
  * @param defaultTaskListId Google Tasks' identifier for a user's default task list (DEFAULT_TASK_LIST_ID).
  */
-export function resolveTaskListIds(taskListIds: string[], defaultTaskListId: string): string[] {
-  return [...new Set([defaultTaskListId, ...taskListIds])];
+export function resolveAccountTaskLists(
+  accounts: { name: string; taskListIds: string[] }[],
+  defaultTaskListId: string,
+): AccountTaskLists[] {
+  return accounts.map((a) => ({ name: a.name, taskListIds: [defaultTaskListId, ...a.taskListIds] }));
 }
 
 /**
@@ -73,16 +91,24 @@ function parseDueBefore(value: string): Date {
 }
 
 /**
- * Wraps TaskService as an AI SDK tool (design_doc §5.3 pattern, extended for issue #3), instead of exposing
- * the MCP server's tools directly. Only list_tasks is exposed; creation/update/deletion are out of scope.
- * @param taskListIds De-duplicated task lists queried by `service` (default plus any configured extras),
- * mentioned in the tool description only when there is more than the default list.
+ * Builds the tool description's scope hint, mentioning every account/task-list combination only when there
+ * is more than the single default list of a single account to disambiguate.
  */
-export function createTaskTools(service: TaskService, taskListIds: string[]): ToolSet {
-  const scopeHint =
-    taskListIds.length > 1
-      ? ` Merges tasks across every configured task list: ${taskListIds.join(", ")}.`
-      : "";
+function describeScope(accountTaskLists: AccountTaskLists[]): string {
+  const hasExtras = accountTaskLists.length > 1 || accountTaskLists.some((a) => a.taskListIds.length > 1);
+  if (!hasExtras) return "";
+  const perAccount = accountTaskLists.map((a) => `${a.name}: ${a.taskListIds.join(", ")}`);
+  return ` Merges tasks across every account and task list: ${perAccount.join("; ")}.`;
+}
+
+/**
+ * Wraps TaskService as an AI SDK tool (design_doc §5.3 pattern, extended for issue #3/#5), instead of exposing
+ * gws directly. Only list_tasks is exposed; creation/update/deletion are out of scope.
+ * @param accountTaskLists Every account's task lists (default plus configured extras), from
+ * resolveAccountTaskLists; mentioned in the tool description only when there is more than one to disambiguate.
+ */
+export function createTaskTools(service: TaskService, accountTaskLists: AccountTaskLists[]): ToolSet {
+  const scopeHint = describeScope(accountTaskLists);
 
   return {
     list_tasks: tool({

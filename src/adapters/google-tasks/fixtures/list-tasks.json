@@ -1,6 +1,7 @@
 {
-  "count": 2,
-  "tasks": [
+  "kind": "tasks#tasks",
+  "etag": "\"fixture-etag-1\"",
+  "items": [
     {
       "id": "task_open_001",
       "title": "Buy milk",
@@ -14,6 +15,5 @@
       "status": "completed",
       "completed": "2026-09-20T04:00:00.000Z"
     }
-  ],
-  "has_more": false
+  ]
 }

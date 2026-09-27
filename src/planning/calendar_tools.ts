@@ -58,7 +58,10 @@ type AccountShape = { account: z.ZodOptional<z.ZodEnum<Record<string, string>>> 
 
 /**
  * Builds the optional `account` argument.
- * It is omitted entirely without configured accounts, because the adapter rejects any account in that mode.
+ * Named-account mode is now mandatory (config.ts requires at least one account), so `accounts` is never
+ * empty when called from `src/index.ts`; the empty case only matters to callers (e.g. tests) that construct
+ * the tool set directly with zero accounts, in which case the field is omitted since there is nothing to
+ * disambiguate (mirrors calendarIdShape's `<= 1` check for the same reason).
  */
 function accountShape(accounts: string[], purpose: string): AccountShape {
   if (accounts.length === 0) {
@@ -109,26 +112,20 @@ export interface AccountCalendarIds {
 }
 
 /**
- * De-duplicated union of the default calendar and every configured account's calendar ids in named-account
- * mode, or the default calendar and the given `calendarIds` in unnamed-account mode. This is the single
+ * De-duplicated union of the default calendar and every configured account's calendar ids. This is the single
  * source of truth for the `calendarId` enum offered to the LLM by createCalendarTools, mirroring how
- * GoogleCalendarAdapter's calendarsFor treats top-level calendarIds as belonging only to the unnamed account.
- * @param accounts Configured accounts, each with its own extra calendar ids. Empty in unnamed-account mode.
- * @param calendarIds Extra calendar ids for the server's single unnamed account; ignored once accounts is non-empty.
+ * GoogleCalendarAdapter's calendarsFor resolves the calendars available to a given account.
+ * @param accounts Configured accounts, each with its own extra calendar ids. At least one is required
+ * (named-account mode is mandatory, see the implementation plan).
  * @param defaultCalendarId Google Calendar's identifier for a user's own calendar (DEFAULT_CALENDAR_ID).
  */
-export function resolveCalendarIds(
-  accounts: AccountCalendarIds[],
-  calendarIds: string[],
-  defaultCalendarId: string,
-): string[] {
-  const extraIds = accounts.length > 0 ? accounts.flatMap((a) => a.calendarIds) : calendarIds;
-  return [...new Set([defaultCalendarId, ...extraIds])];
+export function resolveCalendarIds(accounts: AccountCalendarIds[], defaultCalendarId: string): string[] {
+  return [...new Set([defaultCalendarId, ...accounts.flatMap((a) => a.calendarIds)])];
 }
 
 /**
- * Wraps CalendarService as AI SDK tools (design_doc §5.3), instead of exposing the MCP server's tools directly.
- * @param accounts Account nicknames from mcp_config.json; offered to the LLM as the allowed `account` values.
+ * Wraps CalendarService as AI SDK tools (design_doc §5.3), instead of exposing gws directly.
+ * @param accounts Account nicknames from google_config.json; offered to the LLM as the allowed `account` values.
  * @param calendarIds De-duplicated union of the default calendar and every account's calendar ids, offered to
  * the LLM as the allowed `calendarId` values. A given id must belong to the chosen account; the adapter rejects
  * mismatched account/calendarId pairs.
