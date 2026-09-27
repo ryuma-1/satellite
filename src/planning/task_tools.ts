@@ -3,8 +3,9 @@ import { z } from "zod";
 import { DEFAULT_WORKING_HOURS, type WorkingHours } from "../config/schedule_config";
 import type { CalendarService } from "../services/calendar";
 import type { NewTask, Task, TaskService } from "../services/tasks";
-import { DATE_ONLY, formatLocalDate, parseDateInput } from "./datetime";
-import { DEFAULT_ESTIMATED_HOURS, DEFAULT_SEARCH_DAYS, computeSearchRange, suggestDueDate } from "./due_date_suggestion";
+import { DATE_ONLY, formatLocalDate, formatLocalDateTime, parseDateInput } from "./datetime";
+import { computeFreeSlotRange, DEFAULT_ESTIMATED_HOURS, findFreeSlot, hasCandidateWorkingDay } from "./due_date_suggestion";
+import { checkTaskDraft, type TaskDraftInput } from "./task_draft";
 import { withEstimateMarker } from "./task_estimate";
 
 /**
@@ -157,20 +158,21 @@ function taskListIdShape(taskListIds: string[], purpose: string): TaskListIdShap
  */
 export interface TaskToolsOptions {
   /**
-   * Returns the current time; injectable so suggest_due_date is deterministic in tests. Defaults to the real
+   * Returns the current time; injectable so find_free_slot is deterministic in tests. Defaults to the real
    * current time.
    */
   now?: () => Date;
-  /** The user's working time (schedule_config.json) suggest_due_date schedules into; defaults to Mon-Fri 9-18. */
+  /** The user's working time (schedule_config.json) find_free_slot schedules into; defaults to Mon-Fri 9-18. */
   workingHours?: WorkingHours;
 }
 
 /**
- * Wraps TaskService as AI SDK tools (design_doc §5.3 pattern, extended for issue #3/#5, then #7 for
- * create_task/suggest_due_date), instead of exposing gws directly. update_task/delete_task remain out of scope.
+ * Wraps TaskService as AI SDK tools (design_doc §5.3 pattern, extended for issue #3/#5, then #7/#9 for
+ * create_task/check_task_draft/find_free_slot), instead of exposing gws directly. update_task/delete_task
+ * remain out of scope.
  * @param accountTaskLists Every account's task lists (default plus configured extras), from
  * resolveAccountTaskLists; mentioned in tool descriptions/schemas only when there is more than one to disambiguate.
- * @param calendarService Used by suggest_due_date to read calendar availability; not otherwise exposed here
+ * @param calendarService Used by find_free_slot to read calendar availability; not otherwise exposed here
  * (list_events/create_event etc. are createCalendarTools' responsibility).
  * @param options See TaskToolsOptions.
  */
@@ -241,7 +243,7 @@ export function createTaskTools(
           .positive()
           .optional()
           .describe(
-            "Estimated hours the task will take (the same value passed to suggest_due_date). Recorded in the " +
+            "Estimated hours the task will take (the same value passed to find_free_slot). Recorded in the " +
               "task's notes so later due-date suggestions count it against that day's working time. When " +
               "splitting into subtasks, set it on each subtask rather than on the parent.",
           ),
@@ -262,41 +264,62 @@ export function createTaskTools(
       },
     }),
 
-    suggest_due_date: tool({
+    check_task_draft: tool({
       description:
-        "Suggest a reasonable due date for a new task: the first working day whose working time, minus calendar " +
-        "events and the estimated hours of tasks already due that day, still fits the new task's estimate " +
-        "(never guess a due date yourself; call this instead when the user has not given an explicit one). " +
-        "`fits: false` means no day in the search window has room; tell the user so when presenting the date.",
+        "Check whether a task draft has every field required before calling create_task (title, " +
+        "estimatedHours, deadline). Call this before create_task, and after every ask_user answer, until " +
+        "`complete: true`; `missing` lists which fields still need an ask_user question.",
       inputSchema: z.object({
+        title: z.string().optional().describe("Task title, if known"),
+        estimatedHours: z.number().optional().describe("Estimated hours the task will take, if known"),
+        deadline: z.string().optional().describe(`Deadline, if known. ${DATE_HINT}`),
+      }),
+      execute: async (input: TaskDraftInput) => checkTaskDraft(input),
+    }),
+
+    find_free_slot: tool({
+      description:
+        "Find the earliest working day, up to a deadline, whose working time, minus calendar events and the " +
+        "estimated hours of tasks already due that day, still has a free interval long enough for a new task " +
+        "(never guess a due date yourself; call this once the task's deadline and estimatedHours are known). " +
+        "Save `date` as the task's due date; `slotStart` is a reference start time for display only and " +
+        "should not be saved. `fits: false` means no day up to the deadline has room; tell the user so when " +
+        "presenting the date.",
+      inputSchema: z.object({
+        deadline: z.string().describe(`Deadline the task must be done by. ${DATE_HINT}`),
         estimatedHours: z
           .number()
           .positive()
           .optional()
           .describe(`Estimated hours the task will take; defaults to ${DEFAULT_ESTIMATED_HOURS}.`),
-        searchDays: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe(
-            `Number of candidate working days (days without configured working hours are never suggested) ` +
-              `to search ahead for a candidate; defaults to ${DEFAULT_SEARCH_DAYS}.`,
-          ),
       }),
-      execute: async ({ estimatedHours, searchDays }) => {
-        // Bounds the calendar/task fetch to exactly the window suggestDueDate can draw a candidate from,
-        // instead of an unfiltered fetch that would page through a user's entire event/task history.
+      execute: async ({ deadline, estimatedHours }) => {
+        const parsedDeadline = parseDateInput(deadline, "deadline");
         // Read the clock once so the fetch window and the candidate walk cannot disagree across midnight.
         const current = now();
-        const range = computeSearchRange(current, searchDays, workingHours);
+        // A deadline of today (or the past) leaves no candidate day at all; fail with the friendly message
+        // before fetching, instead of computeFreeSlotRange producing timeMin >= timeMax for the Calendar API.
+        if (!hasCandidateWorkingDay(current, parsedDeadline, workingHours)) {
+          throw new Error("no working day between tomorrow and the deadline");
+        }
+        // Bounds the calendar/task fetch to exactly the window findFreeSlot can draw a candidate from,
+        // instead of an unfiltered fetch that would page through a user's entire event/task history.
+        const range = computeFreeSlotRange(current, parsedDeadline);
         const [tasks, events] = await Promise.all([
           service.listTasks({ dueAfter: range.start, dueBefore: range.end, completed: false }),
           calendarService.listEvents({ from: range.start, to: range.end }),
         ]);
-        const suggestion = suggestDueDate({ now: current, events, tasks, estimatedHours, searchDays, workingHours });
+        const suggestion = findFreeSlot({
+          now: current,
+          deadline: parsedDeadline,
+          events,
+          tasks,
+          estimatedHours,
+          workingHours,
+        });
         return {
-          due: formatLocalDate(suggestion.date),
+          date: formatLocalDate(suggestion.date),
+          slotStart: formatLocalDateTime(suggestion.slotStart),
           freeHours: suggestion.freeHours,
           tasksDueThatDay: suggestion.tasksDueThatDay,
           taskHours: suggestion.taskHours,

@@ -1,3 +1,4 @@
+import type { SkillMeta } from "../skills/registry";
 import { formatLocalDateTime } from "./datetime";
 import type { AccountTaskLists } from "./task_tools";
 
@@ -49,6 +50,11 @@ export interface BuildSystemPromptOptions {
    * accounts are configured (design decision, issue #5), so this is only empty in tests that omit it.
    */
   accountTaskLists?: AccountTaskLists[];
+  /**
+   * Every discovered Skill's metadata (from discoverSkills), presented as a description list every turn
+   * (design_doc §2.2 step 1) so the LLM can decide whether to call load_skill for one of them.
+   */
+  skills?: SkillMeta[];
   /** IANA zone name; injectable so tests do not depend on the host setting. */
   timeZone?: string;
 }
@@ -64,6 +70,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
     accounts,
     accountCalendars = [],
     accountTaskLists = [],
+    skills = [],
     timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone,
   } = options;
 
@@ -77,6 +84,13 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
     "- 予定の更新・削除では，list_events で取得した id と account を使ってください．",
     "- 回答は日本語で，簡潔にしてください．",
   ];
+
+  if (skills.length > 0) {
+    lines.push("- 利用可能な Skill（該当するものがあれば load_skill で本体を読み込んでから，その手順に従ってください）:");
+    for (const skill of skills) {
+      lines.push(`  - ${skill.name}: ${skill.description}`);
+    }
+  }
 
   if (accounts.length > 0) {
     lines.push(`- 利用できるアカウント: ${accounts.join(", ")}（予定の作成先を指定しない場合は ${accounts[0]}）`);
@@ -94,17 +108,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
       const perAccount = accountTaskLists.map((a) => `${a.name}: ${a.taskListIds.join(", ")}`);
       lines.push(`- 利用できるタスクリスト: ${perAccount.join("，")}`);
     }
-    lines.push(
-      "- 新しいタスクの作成を依頼されたら，create_task を呼ぶ前に必ず次の手順を踏んでください．",
-      "  1. list_tasks で，似た内容の既存タスクがないか確認してください（重複検出）．",
-      "  2. タスクの所要時間（estimatedHours）を見積もってください．ユーザーが期日を指定していない場合は，その見積もりを渡して suggest_due_date を呼び，無理のない期日を提案してください．" +
-        "fits: false が返った場合は，期間内に空きがないことを提示に含めてください．",
-      "  3. 類似タスクが見つかった場合は重複の可能性を，タスクが大きいと判断した場合はサブタスクへの分割案を，" +
-        "それぞれユーザーへの提示に含めてください（分割の要否・内容はあなた自身の判断で決め，コード側には分割ロジックはありません）．",
-      "  4. create_task を呼ぶ前に，必ず request_confirmation でタイトル・提案期日・分割内容を含む提案の全文を提示し，承認を得てください．",
-      "  5. request_confirmation の結果が approved: false の場合は，create_task を呼ばないでください．",
-      "  6. create_task には見積もった estimatedHours を渡してください．サブタスクに分割した場合は，親タスクではなく各サブタスクに渡してください．",
-    );
   }
 
   return lines.join("\n");

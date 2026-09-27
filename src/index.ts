@@ -6,17 +6,20 @@ import { GwsProcessRunner } from "./gws/runner";
 import { createModel } from "./llm/model";
 import { runAgent } from "./planning/agent";
 import { createCalendarTools, resolveCalendarIds } from "./planning/calendar_tools";
-import { createConfirmationTools } from "./planning/confirmation_tools";
+import { createDialogueTools } from "./planning/dialogue_tools";
+import { createSkillTools } from "./planning/skill_tools";
 import { buildSystemPrompt, resolveAccountCalendars } from "./planning/system_prompt";
 import { createTaskTools, resolveAccountTaskLists } from "./planning/task_tools";
+import { discoverSkills, loadSkillBody } from "./skills/registry";
 
 /**
- * Upper bound on model steps for one runAgent call. Raised above runAgent's own default of 10: creating a
- * task now typically spans list_tasks (duplicate check), suggest_due_date (which itself calls list_tasks and
- * list_events), request_confirmation, and one create_task call per subtask, before the final text answer
- * (implementation plan, issue #7, "maxSteps 不足の可能性").
+ * Upper bound on model steps for one runAgent call. Raised above runAgent's own default of 10, and again
+ * above issue #7's 20: creating a task now typically spans load_skill, a check_task_draft/ask_user loop
+ * (repeated once per missing field), list_tasks (duplicate check), one find_free_slot call and one
+ * (Hook-confirmed) create_task call per subtask, before the final text answer (implementation plan, issue #9,
+ * "MAX_AGENT_STEPS の再見積もり").
  */
-const MAX_AGENT_STEPS = 20;
+const MAX_AGENT_STEPS = 30;
 
 /**
  * Answers one natural-language request, letting the LLM call calendar and task tools as needed.
@@ -48,17 +51,25 @@ async function main() {
 
   const calendar = new GoogleCalendarAdapter(runner, { accounts: config.accounts });
   const tasks = new GoogleTasksAdapter(runner, { accounts: config.accounts });
+  const skills = await discoverSkills();
 
   const tools = {
     ...createCalendarTools(calendar, accountNames, calendarIds),
     ...createTaskTools(tasks, accountTaskLists, calendar, { workingHours: schedule.workingHours }),
-    ...createConfirmationTools(),
+    ...createSkillTools(skills, (name) => loadSkillBody(name)),
+    ...createDialogueTools(),
   };
 
   const answer = runAgent({
     model,
     tools,
-    instructions: buildSystemPrompt({ now: new Date(), accounts: accountNames, accountCalendars, accountTaskLists }),
+    instructions: buildSystemPrompt({
+      now: new Date(),
+      accounts: accountNames,
+      accountCalendars,
+      accountTaskLists,
+      skills,
+    }),
     prompt: question,
     maxSteps: MAX_AGENT_STEPS,
     onToolError: (toolName, error) => {
