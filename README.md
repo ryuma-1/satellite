@@ -100,6 +100,8 @@ cp .env.example .env
 mkdir -p ~/.config/satellite
 cp google_config.json.example ~/.config/satellite/google_config.json
 # google_config.json に利用するアカウントを設定
+# （任意）作業時間を変更する場合
+cp schedule_config.json.example ~/.config/satellite/schedule_config.json
 
 # アカウントごとに一度だけ認証する（ブラウザで OAuth を承認）
 bun run src/cli/auth.ts <account>
@@ -145,6 +147,22 @@ GOOGLE_OAUTH_CREDENTIALS=/path/to/gcp-oauth.keys.json
 - `accounts`: 1 件以上必須。文字列はアカウント名のみ（primary カレンダーと既定のタスクリストを使用）、オブジェクトでは追加のカレンダー ID（`calendarIds`）やタスクリスト ID（`taskListIds`）を指定できる。共有カレンダーは、それを所有・購読しているアカウントの下に書く。
 - `gwsCommand`（任意）: gws の起動コマンドを argv 配列で上書きする（既定は `["bunx", "@googleworkspace/cli@0.22.5"]`）。
 - 認証情報はアカウントごとに `~/.config/satellite/gws/<account>/` に保存される。
+
+タスク作成時の期日提案で使う作業時間は `~/.config/satellite/schedule_config.json` で設定します（`schedule_config.json.example` を参照）。ファイルがない場合は平日 9:00〜18:00 として扱います。
+
+```json
+{
+  "workingHours": {
+    "mon": [{ "start": "09:00", "end": "12:00" }, { "start": "13:00", "end": "18:00" }],
+    "sat": [],
+    "sun": []
+  }
+}
+```
+
+- `workingHours`: 曜日（`mon`〜`sun`）ごとに作業時間帯を `"HH:MM"` 形式で指定する。1 日に複数の時間帯を書けるため、昼休みなどを除外できる。書かなかった曜日や空配列の曜日は作業なしとして扱う。
+- 期日提案は作業時間内の空き時間だけを数え、作業時間外（自由時間・睡眠時間）にはタスクを割り当てない。作業時間のない曜日は期日の候補にしない。
+- 未知の曜日キー、書式の誤った時刻、重なった時間帯、全曜日が空の設定はエラーになる。
 
 ## ロードマップ
 
