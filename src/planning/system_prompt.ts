@@ -94,6 +94,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
       const perAccount = accountTaskLists.map((a) => `${a.name}: ${a.taskListIds.join(", ")}`);
       lines.push(`- 利用できるタスクリスト: ${perAccount.join("，")}`);
     }
+    lines.push(
+      "- 新しいタスクの作成を依頼されたら，create_task を呼ぶ前に必ず次の手順を踏んでください．",
+      "  1. list_tasks で，似た内容の既存タスクがないか確認してください（重複検出）．",
+      "  2. ユーザーが期日を指定していない場合は，list_events や suggest_due_date を使って無理のない期日を提案してください．",
+      "  3. 類似タスクが見つかった場合は重複の可能性を，タスクが大きいと判断した場合はサブタスクへの分割案を，" +
+        "それぞれユーザーへの提示に含めてください（分割の要否・内容はあなた自身の判断で決め，コード側には分割ロジックはありません）．",
+      "  4. create_task を呼ぶ前に，必ず request_confirmation でタイトル・提案期日・分割内容を含む提案の全文を提示し，承認を得てください．",
+      "  5. request_confirmation の結果が approved: false の場合は，create_task を呼ばないでください．",
+    );
   }
 
   return lines.join("\n");

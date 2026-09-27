@@ -117,6 +117,92 @@ describe("GoogleTasksAdapter", () => {
       "requires at least one account",
     );
   });
+
+  test("createTask inserts into the default account/task list and maps the result", async () => {
+    const caller = new FakeCaller({ id: "task1", title: "Buy milk", status: "needsAction" });
+    const created = await new GoogleTasksAdapter(caller, { accounts: ["acct"] }).createTask({ title: "Buy milk" });
+
+    expect(caller.calls).toEqual([
+      {
+        account: "acct",
+        req: {
+          path: ["tasks", "tasks", "insert"],
+          params: { tasklist: "@default" },
+          body: { title: "Buy milk" },
+        },
+      },
+    ]);
+    expect(created).toEqual({ id: "task1", title: "Buy milk", completed: false, account: "acct" });
+  });
+
+  test("createTask forwards notes/due in the body", async () => {
+    const caller = new FakeCaller({ id: "task1", title: "Buy milk", status: "needsAction", notes: "2%", due: "2026-09-30T00:00:00.000Z" });
+    await new GoogleTasksAdapter(caller, { accounts: ["acct"] }).createTask({
+      title: "Buy milk",
+      notes: "2%",
+      due: new Date(2026, 8, 30),
+    });
+
+    expect(caller.calls[0]?.req.body).toEqual({
+      title: "Buy milk",
+      notes: "2%",
+      due: "2026-09-30T00:00:00.000Z",
+    });
+  });
+
+  test("createTask passes parent as a query parameter, to create a subtask", async () => {
+    const caller = new FakeCaller({ id: "sub1", title: "Subtask", status: "needsAction", parent: "parent1" });
+    const created = await new GoogleTasksAdapter(caller, { accounts: ["acct"] }).createTask({
+      title: "Subtask",
+      parent: "parent1",
+    });
+
+    expect(caller.calls[0]?.req.params).toEqual({ tasklist: "@default", parent: "parent1" });
+    expect(caller.calls[0]?.req.body).toEqual({ title: "Subtask" });
+    expect(created.parent).toBe("parent1");
+  });
+
+  test("createTask rejects an unknown account", async () => {
+    const adapter = new GoogleTasksAdapter(new FakeCaller({}), { accounts: ["acct"] });
+    await expect(adapter.createTask({ title: "x", account: "other" })).rejects.toThrow('Unknown account "other"');
+  });
+
+  test("createTask rejects an unknown taskListId for the given account", async () => {
+    const adapter = new GoogleTasksAdapter(new FakeCaller({}), { accounts: ["acct"] });
+    await expect(adapter.createTask({ title: "x", taskListId: "work-list" })).rejects.toThrow(
+      'Unknown taskListId "work-list" for account "acct"',
+    );
+  });
+});
+
+describe("GoogleTasksAdapter.createTask with multiple accounts and task lists", () => {
+  test("creates in a non-default account/task list when given", async () => {
+    const caller = new FakeCaller((account: string) => ({ id: "w1", title: "Work task", status: "needsAction" }));
+    const adapter = new GoogleTasksAdapter(caller, { accounts: ["normal", { name: "school", taskListIds: ["work-list"] }] });
+
+    const created = await adapter.createTask({ title: "Work task", account: "school", taskListId: "work-list" });
+
+    expect(caller.calls[0]).toEqual({
+      account: "school",
+      req: {
+        path: ["tasks", "tasks", "insert"],
+        params: { tasklist: "work-list" },
+        body: { title: "Work task" },
+      },
+    });
+    expect(created.account).toBe("school");
+    expect(created.taskListId).toBe("work-list");
+  });
+
+  test("defaults to the first configured account and its default task list", async () => {
+    const caller = new FakeCaller({ id: "d1", title: "Default", status: "needsAction" });
+    const adapter = new GoogleTasksAdapter(caller, { accounts: ["normal", "school"] });
+
+    await adapter.createTask({ title: "Default" });
+
+    expect(caller.calls[0]?.account).toBe("normal");
+    expect(caller.calls[0]?.req.params).toEqual({ tasklist: "@default" });
+  });
 });
 
 describe("GoogleTasksAdapter with multiple accounts", () => {

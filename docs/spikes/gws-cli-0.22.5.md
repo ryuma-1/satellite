@@ -201,3 +201,38 @@ been replaced with fictitious values):
   `items` array) of `gws tasks tasks list --page-all`.
 - `src/adapters/google-tasks/fixtures/list-empty-tasks.json`: mimics the empty-results envelope observed in §6,
   used to test that a page without an `items` key is treated as zero tasks.
+
+## 11. `tasks.tasks.insert` request shape (issue #7, **not yet verified against a real account**)
+
+**This section is not based on a live gws invocation.** `gws` was not installed in the environment this was
+implemented in (`which gws` failed), so `gws schema tasks.tasks.insert --resolve-refs` could not be run and no
+live `insert` call (with or without `parent`) could be exercised. The shape below is instead inferred from the
+Google Tasks API v1 reference (`tasks.insert`: https://developers.google.com/tasks/reference/rest/v1/tasks/insert)
+together with the conventions already confirmed elsewhere in this document (§1's `--params`/`--json` split, and
+§6's observation that gws is "a thin wrapper over the Tasks API" with no extra behavior of its own). **Before
+relying on this in production, re-run `gws schema tasks.tasks.insert --resolve-refs` and a real `insert` call
+(with and without `parent`) against a live account, and correct this section if it disagrees.**
+
+- Invocation shape: `gws tasks tasks insert --params '{...}' --json '{...}'`, mirroring `calendar.events.insert`'s
+  `--params`/`--json` split (§8) rather than `tasks.tasks.list`'s all-`--params` shape, since `insert` is a
+  write with both URL parameters and a request body.
+- `--params` (query parameters):
+  - `tasklist` (required): the task list id to insert into, same as `tasks.tasks.list`'s `tasklist` (§6).
+  - `parent` (optional): id of an existing task in the same list. Per the API reference, this designates the
+    new task as the last child of that parent, creating a subtask. **This is a query parameter of the `insert`
+    method itself, not a field of the Task resource body** — the Task resource's own `parent` field (already
+    modeled in `GoogleTask.parent`, populated by `tasks.tasks.list`, §6) is read-only output, only ever set as a
+    side effect of this query parameter (or of `tasks.move`). The adapter (`GoogleTasksAdapter.createTask`)
+    reflects this by attaching `parent` to the request's `params`, never to its `body`.
+  - `previous` (optional, not exposed by this issue's `NewTask`/`create_task`): id of the sibling task this one
+    should be inserted after. Left unused for now, since issue #7 has no requirement to control subtask
+    ordering; noted here so a future change does not need to re-derive this from the API reference.
+- `--json` (request body, a partial Task resource): `title` (required), `notes` (optional), `due` (optional,
+  RFC 3339 UTC-midnight timestamp, e.g. `"2026-10-01T00:00:00.000Z"` — the same format `toDueTimestamp` already
+  produces for `dueMin`/`dueMax`, and the same format `tasks.tasks.list` returns in `due`, §6). `status` is
+  omitted, since Google defaults a newly inserted task to `"needsAction"`.
+- Expected response: per the API reference and by analogy with `calendar.events.insert` returning the Event
+  resource directly with no wrapper (§8), `tasks.tasks.insert` is expected to return the created Task resource
+  itself (`{ id, title, status, notes?, due?, parent?, ... }`), i.e. the same shape `tasks.tasks.list` returns
+  per item (§6). `GoogleTasksAdapter.createTask` reuses `mapper.ts`'s existing `toTask` to parse it, unverified
+  against a real response.

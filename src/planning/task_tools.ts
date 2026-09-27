@@ -1,7 +1,9 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import type { Task, TaskService } from "../services/tasks";
+import type { CalendarService } from "../services/calendar";
+import type { NewTask, Task, TaskService } from "../services/tasks";
 import { DATE_ONLY, formatLocalDate, parseDateInput } from "./datetime";
+import { DEFAULT_ESTIMATED_HOURS, DEFAULT_SEARCH_DAYS, computeSearchRange, suggestDueDate } from "./due_date_suggestion";
 
 /**
  * Task as returned to the LLM: the due date becomes a plain YYYY-MM-DD string so the tool result is
@@ -22,6 +24,8 @@ export interface TaskView {
   account?: string;
   /** Id of the task list the task belongs to, when multiple task lists are configured. */
   taskListId?: string;
+  /** Id of the parent task, when this task is a subtask. */
+  parent?: string;
 }
 
 /**
@@ -37,6 +41,7 @@ export function toTaskView(task: Task): TaskView {
   if (task.notes !== undefined) view.notes = task.notes;
   if (task.account !== undefined) view.account = task.account;
   if (task.taskListId !== undefined) view.taskListId = task.taskListId;
+  if (task.parent !== undefined) view.parent = task.parent;
   return view;
 }
 
@@ -102,13 +107,73 @@ function describeScope(accountTaskLists: AccountTaskLists[]): string {
 }
 
 /**
- * Wraps TaskService as an AI SDK tool (design_doc §5.3 pattern, extended for issue #3/#5), instead of exposing
- * gws directly. Only list_tasks is exposed; creation/update/deletion are out of scope.
- * @param accountTaskLists Every account's task lists (default plus configured extras), from
- * resolveAccountTaskLists; mentioned in the tool description only when there is more than one to disambiguate.
+ * Schema shape for the optional `account` argument, mirroring calendar_tools.ts's accountShape.
  */
-export function createTaskTools(service: TaskService, accountTaskLists: AccountTaskLists[]): ToolSet {
+type AccountShape = { account: z.ZodOptional<z.ZodEnum<Record<string, string>>> };
+
+/**
+ * Builds the optional `account` argument. Omitted only when there are no accounts at all (mirrors
+ * calendar_tools.ts's accountShape; see its doc comment for why zero, not one, is the cutoff).
+ */
+function accountShape(accounts: string[], purpose: string): AccountShape {
+  if (accounts.length === 0) {
+    // Typed as present so tool inputs infer `account: string | undefined`; an absent key reads as undefined.
+    return {} as AccountShape;
+  }
+  return {
+    account: z
+      .enum(accounts as [string, ...string[]])
+      .optional()
+      .describe(purpose),
+  };
+}
+
+/**
+ * Schema shape for the optional `taskListId` argument, mirroring calendar_tools.ts's calendarIdShape.
+ */
+type TaskListIdShape = { taskListId: z.ZodOptional<z.ZodEnum<Record<string, string>>> };
+
+/**
+ * Builds the optional `taskListId` argument. Omitted when at most the default task list is configured, since
+ * there is then nothing to disambiguate (mirrors calendar_tools.ts's calendarIdShape).
+ */
+function taskListIdShape(taskListIds: string[], purpose: string): TaskListIdShape {
+  if (taskListIds.length <= 1) {
+    // Typed as present so tool inputs infer `taskListId: string | undefined`; an absent key reads as undefined.
+    return {} as TaskListIdShape;
+  }
+  return {
+    taskListId: z
+      .enum(taskListIds as [string, ...string[]])
+      .optional()
+      .describe(purpose),
+  };
+}
+
+/**
+ * Wraps TaskService as AI SDK tools (design_doc §5.3 pattern, extended for issue #3/#5, then #7 for
+ * create_task/suggest_due_date), instead of exposing gws directly. update_task/delete_task remain out of scope.
+ * @param accountTaskLists Every account's task lists (default plus configured extras), from
+ * resolveAccountTaskLists; mentioned in tool descriptions/schemas only when there is more than one to disambiguate.
+ * @param calendarService Used by suggest_due_date to read calendar availability; not otherwise exposed here
+ * (list_events/create_event etc. are createCalendarTools' responsibility).
+ * @param now Returns the current time; injectable so suggest_due_date is deterministic in tests. Defaults to
+ * the real current time.
+ */
+export function createTaskTools(
+  service: TaskService,
+  accountTaskLists: AccountTaskLists[],
+  calendarService: CalendarService,
+  now: () => Date = () => new Date(),
+): ToolSet {
   const scopeHint = describeScope(accountTaskLists);
+  const accounts = accountTaskLists.map((a) => a.name);
+  const taskListIds = [...new Set(accountTaskLists.flatMap((a) => a.taskListIds))];
+  const targetAccount = accountShape(accounts, `Account to create the task in. Defaults to "${accounts[0]}".`);
+  const targetTaskListId = taskListIdShape(
+    taskListIds,
+    `Task list to create the task in; must belong to the chosen \`account\`. Defaults to "${taskListIds[0]}".`,
+  );
 
   return {
     list_tasks: tool({
@@ -138,6 +203,74 @@ export function createTaskTools(service: TaskService, accountTaskLists: AccountT
           completed,
         });
         return tasks.map(toTaskView);
+      },
+    }),
+
+    create_task: tool({
+      description:
+        "Create a task and return it as stored. To create a subtask, pass `parent` with an existing task's " +
+        "id (e.g. from list_tasks or a prior create_task result).",
+      inputSchema: z.object({
+        title: z.string().describe("Task title"),
+        due: z
+          .string()
+          .optional()
+          .describe(
+            `Due date; should be a plain date (YYYY-MM-DD). Google Tasks stores only the date part, so a ` +
+              `time-of-day, if given, is converted to local time and then discarded. ${DATE_HINT}`,
+          ),
+        notes: z.string().optional().describe("Notes"),
+        parent: z.string().optional().describe("Id of an existing task to create this task as a subtask of"),
+        ...targetAccount,
+        ...targetTaskListId,
+      }),
+      execute: async (input) => {
+        const task: NewTask = {
+          title: input.title,
+          due: input.due !== undefined ? parseDateInput(input.due, "due") : undefined,
+          notes: input.notes,
+          parent: input.parent,
+          account: input.account,
+          taskListId: input.taskListId,
+        };
+        return toTaskView(await service.createTask(task));
+      },
+    }),
+
+    suggest_due_date: tool({
+      description:
+        "Suggest a reasonable due date for a new task, based on calendar availability and existing task load " +
+        "(never guess a due date yourself; call this instead when the user has not given an explicit one).",
+      inputSchema: z.object({
+        estimatedHours: z
+          .number()
+          .positive()
+          .optional()
+          .describe(`Estimated hours the task will take; defaults to ${DEFAULT_ESTIMATED_HOURS}.`),
+        searchDays: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            `Number of candidate weekdays (Mon-Fri; weekends are never suggested) to search ahead for a ` +
+              `candidate; defaults to ${DEFAULT_SEARCH_DAYS}.`,
+          ),
+      }),
+      execute: async ({ estimatedHours, searchDays }) => {
+        // Bounds the calendar/task fetch to exactly the window suggestDueDate can draw a candidate from,
+        // instead of an unfiltered fetch that would page through a user's entire event/task history.
+        const range = computeSearchRange(now(), searchDays);
+        const [tasks, events] = await Promise.all([
+          service.listTasks({ dueAfter: range.start, dueBefore: range.end, completed: false }),
+          calendarService.listEvents({ from: range.start, to: range.end }),
+        ]);
+        const suggestion = suggestDueDate({ now: now(), events, tasks, estimatedHours, searchDays });
+        return {
+          due: formatLocalDate(suggestion.date),
+          freeHours: suggestion.freeHours,
+          tasksDueThatDay: suggestion.tasksDueThatDay,
+        };
       },
     }),
   };

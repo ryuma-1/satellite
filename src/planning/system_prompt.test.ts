@@ -82,6 +82,26 @@ describe("buildSystemPrompt", () => {
     });
     expect(prompt).toContain("利用できるタスクリスト: personal: @default，school: @default");
   });
+
+  test("adds task creation workflow guidance covering duplicate-checking, due-date suggestion and confirmation", () => {
+    const prompt = buildSystemPrompt({
+      now,
+      accounts: [],
+      accountTaskLists: [{ name: "acct", taskListIds: ["@default"] }],
+      timeZone: "Asia/Tokyo",
+    });
+    expect(prompt).toContain("list_tasks");
+    expect(prompt).toContain("suggest_due_date");
+    expect(prompt).toContain("request_confirmation");
+    expect(prompt).toContain("create_task");
+    expect(prompt).toContain("approved: false");
+  });
+
+  test("omits task creation workflow guidance when tasks are not configured", () => {
+    const prompt = buildSystemPrompt({ now, accounts: [], timeZone: "Asia/Tokyo" });
+    expect(prompt).not.toContain("request_confirmation");
+    expect(prompt).not.toContain("create_task");
+  });
 });
 
 describe("resolveAccountCalendars", () => {

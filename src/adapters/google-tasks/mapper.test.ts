@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import type { NewTask } from "../../services/tasks";
 import fixture from "./fixtures/list-tasks.json";
-import { toDueMaxTimestamp, toDueTimestamp, toTask } from "./mapper";
+import { toDueMaxTimestamp, toDueTimestamp, toInsertBody, toTask } from "./mapper";
 
 describe("toTask", () => {
   test("maps an open task with a due date and notes", () => {
@@ -29,6 +30,15 @@ describe("toTask", () => {
   test("tags the task with the given taskListId", () => {
     expect(toTask(fixture.items[0], undefined, "work-list").taskListId).toBe("work-list");
     expect(toTask(fixture.items[0])).not.toHaveProperty("taskListId");
+  });
+
+  test("maps the parent field for a subtask", () => {
+    const task = toTask({ id: "sub1", title: "Subtask", status: "needsAction", parent: "parent1" });
+    expect(task.parent).toBe("parent1");
+  });
+
+  test("omits parent for a task without one", () => {
+    expect(toTask(fixture.items[0])).not.toHaveProperty("parent");
   });
 
   // Regression test for the UTC-midnight boundary bug called out in the implementation plan: a naive
@@ -85,5 +95,26 @@ describe("toDueMaxTimestamp", () => {
 
   test("leaves an exact local midnight cutoff as-is, excluding that day entirely", () => {
     expect(toDueMaxTimestamp(new Date(2026, 8, 30))).toBe("2026-09-30T00:00:00.000Z");
+  });
+});
+
+describe("toInsertBody", () => {
+  test("includes only title for a bare task", () => {
+    const task: NewTask = { title: "Buy milk" };
+    expect(toInsertBody(task)).toEqual({ title: "Buy milk" });
+  });
+
+  test("includes notes and a formatted due date when given", () => {
+    const task: NewTask = { title: "Buy milk", notes: "2%", due: new Date(2026, 8, 30) };
+    expect(toInsertBody(task)).toEqual({
+      title: "Buy milk",
+      notes: "2%",
+      due: "2026-09-30T00:00:00.000Z",
+    });
+  });
+
+  test("excludes parent, since gws expects it as a query parameter, not a body field", () => {
+    const task: NewTask = { title: "Subtask", parent: "parent1" };
+    expect(toInsertBody(task)).not.toHaveProperty("parent");
   });
 });
