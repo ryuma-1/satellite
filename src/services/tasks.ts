@@ -16,6 +16,11 @@ export interface Task {
   /** Free-form notes attached to the task. */
   notes?: string;
   /**
+   * Nickname of the account the task belongs to (e.g. "personal", "school").
+   * Always set once the service is configured with named accounts (design decision, issue #5).
+   */
+  account?: string;
+  /**
    * Id of the task list the task belongs to (e.g. a non-default list).
    * Undefined when the service is only configured with its default task list.
    */

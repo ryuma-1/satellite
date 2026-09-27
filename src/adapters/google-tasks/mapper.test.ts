@@ -4,7 +4,7 @@ import { toDueMaxTimestamp, toDueTimestamp, toTask } from "./mapper";
 
 describe("toTask", () => {
   test("maps an open task with a due date and notes", () => {
-    const task = toTask(fixture.tasks[0]);
+    const task = toTask(fixture.items[0]);
     expect(task).toEqual({
       id: "task_open_001",
       title: "Buy milk",
@@ -15,15 +15,20 @@ describe("toTask", () => {
   });
 
   test("maps a completed task without a due date", () => {
-    const task = toTask(fixture.tasks[1]);
+    const task = toTask(fixture.items[1]);
     expect(task).toEqual({ id: "task_done_002", title: "Submit report", completed: true });
     expect(task).not.toHaveProperty("due");
     expect(task).not.toHaveProperty("notes");
   });
 
+  test("tags the task with the given account", () => {
+    expect(toTask(fixture.items[0], "school").account).toBe("school");
+    expect(toTask(fixture.items[0])).not.toHaveProperty("account");
+  });
+
   test("tags the task with the given taskListId", () => {
-    expect(toTask(fixture.tasks[0], "work-list").taskListId).toBe("work-list");
-    expect(toTask(fixture.tasks[0])).not.toHaveProperty("taskListId");
+    expect(toTask(fixture.items[0], undefined, "work-list").taskListId).toBe("work-list");
+    expect(toTask(fixture.items[0])).not.toHaveProperty("taskListId");
   });
 
   // Regression test for the UTC-midnight boundary bug called out in the implementation plan: a naive

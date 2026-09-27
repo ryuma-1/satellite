@@ -11,10 +11,9 @@ flowchart TD
     Planning[Planning/Orchestration層<br/>Tool useベース]
     Skill[Skill層<br/>description提示 → 該当Skill本体を注入]
     LLM[LLM抽象化層<br/>初期実装: Gemini]
-    MCP[MCP連携層<br/>都度起動 + トークンキャッシュ]
+    GWS[gws連携層<br/>アカウントごとに都度起動 + ファイルキャッシュ]
     Provider[LLM Provider<br/>Gemini等]
-    ExtTask[Google Tasks等<br/>Task MCPサーバー]
-    ExtCal[Google Calendar等<br/>Calendar MCPサーバー]
+    ExtCal["Google Calendar/Tasks<br/>bunx @googleworkspace/cli 経由（複数アカウント）"]
     SkillFiles[(Skill定義<br/>ローカルファイル→将来共有/配布)]
 
     User --> CLI
@@ -22,10 +21,9 @@ flowchart TD
     Planning --> Skill
     Skill --> SkillFiles
     Planning --> LLM
-    Planning --> MCP
+    Planning --> GWS
     LLM --> Provider
-    MCP --> ExtTask
-    MCP --> ExtCal
+    GWS --> ExtCal
 ```
 
 ### 1.1 CLI層
@@ -45,12 +43,13 @@ flowchart TD
 - Planning/Orchestration層からは，Providerを意識せず共通APIで呼び出せるようにする
 - 初期実装対象のProviderはGemini
 
-### 1.4 MCP連携層
+### 1.4 gws連携層
 
-- Google Tasks / Google Calendar等の外部サービスに，既存の公開MCPサーバー実装（Google Calendar MCP等）を極力再利用してアクセスする
-- Task/Calendarという「サービス種別」を抽象化したインターフェースを持つ
-- **サーバープロセスの起動方式**: CLI起動時に都度サーバープロセスを立ち上げる（常駐はさせない）
-- **認証トークン管理**: OAuth等の認証トークンはローカルにファイルベースでキャッシュし（`~/.config/satellite/` 等を想定），都度起動でも再利用する．OSキーチェーン等のセキュアストレージは使わず，実装コストの低いファイルベース方式を採用
+- Google Tasks / Google Calendarに，Google公式CLI（`bunx @googleworkspace/cli@0.22.5`，以下gws）経由でアクセスする（issue #5でMCPサーバー方式から移行）．カレンダーとタスクを同じ手段（同じrunner・同じアカウント設定・同じアカウントごとのループ）で扱える
+- Task/Calendarという「サービス種別」を抽象化したインターフェースを持つ（`GwsCaller`が両方の入出力を担う）
+- **プロセスの起動方式**: 常駐サーバーは持たず，Tool呼び出しのたびに`Bun.spawn`でgwsプロセスを都度起動する（design_doc §1.4の元方針を踏襲）
+- **複数アカウント**: アカウントは名前付きが必須（`google_config.json`の`accounts`）で，アカウントごとに専用の設定ディレクトリ（`~/.config/satellite/gws/<account>/`，パーミッション0700）を持つ．同じアカウントへの呼び出しは直列化し，異なるアカウントは並列に実行する
+- **認証トークン管理**: OAuth認証情報はファイルキーリング（`GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file`）でアカウントごとのディレクトリにローカルキャッシュし，OSキーチェーンは使わない（`bun run src/cli/auth.ts <account>`で`gws auth login -s calendar,tasks`を一度実行すれば，以降はカレンダーとタスクの両方が使える）
 
 #### 起動方式の検討経緯（都度起動 vs 常駐）
 
@@ -190,38 +189,33 @@ interface CalendarService {
 
 ---
 
-## 4. MCPサーバー連携
+## 4. gws CLI連携
 
-既存の公開MCPサーバー実装（Google Calendar MCP等）を極力再利用し，CLI起動時に都度プロセスを立ち上げる方式を採る．
+Google公式CLI（`bunx @googleworkspace/cli@0.22.5`，gws）を，Tool呼び出しのたびに`Bun.spawn`で都度起動する方式を採る（issue #5でMCPサーバー方式から移行；gwsの正確な挙動はdocs/spikes/gws-cli-0.22.5.mdのスパイク記録を正とする）．
 
 ### 4.1 設定ファイル
 
-MCPサーバーごとの起動コマンド・引数は`.env`ではなく，別途の設定ファイルで管理する．Claude Desktopの`mcp_config.json`と同様の形式を想定する．
+gwsの起動コマンドと，操作対象のアカウント一覧は`.env`ではなく，別途の設定ファイル`google_config.json`で管理する．
 
 ```json
 {
-  "mcpServers": {
-    "task": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-google-tasks"]
-    },
-    "calendar": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-google-calendar"]
-    }
-  }
+  "oauthClientFile": "${GOOGLE_OAUTH_CREDENTIALS}",
+  "accounts": [
+    "personal",
+    { "name": "school", "calendarIds": ["shared-calendar-id@group.calendar.google.com"], "taskListIds": ["work-list-id"] }
+  ]
 }
 ```
 
-APIキーやOAuthクライアント情報など，機密性の高い値は引き続き`.env`側で管理し，設定ファイルからは環境変数を参照する形にする想定．
+APIキーやOAuthクライアント情報など，機密性の高い値は引き続き`.env`側で管理し，設定ファイルからは`${VAR}`で環境変数を参照する形にする．
 
 ### 4.2 サービス構成
 
-MVPでは，サービス種別（Task/Calendar）ごとに1サービスのみを利用する1対1構成とする．同一種別で複数サービスを同時に扱う要件（例: 複数のCalendarアカウントを横断する等）は，MVPスコープ外とする．
+**名前付きアカウントを最低1つ必須**とし，複数のGoogleアカウント（例: `personal`/`school`）を横断してカレンダー・タスクを扱えることを対象範囲に含める（issue #1・#5）．アカウントはそれぞれ独立した認証ディレクトリ（`~/.config/satellite/gws/<account>/`）を持ち，1アカウントにつき1回の認証（`gws auth login -s calendar,tasks`）でカレンダーとタスクの両方が使える．
 
 ### 4.3 Adapterとの結線
 
-設定ファイルで定義された各MCPサーバーに対し，対応するAdapter（`TaskService`実装 / `CalendarService`実装）を1つずつ紐付ける．Planning/Orchestration層のLLMには，Adapterが公開する正規化されたTool定義のみが見える．
+`google_config.json`で定義された各アカウントに対し，共通の`GwsCaller`（`src/gws/runner.ts`）が1つのgws実行主体として振る舞い，`GoogleCalendarAdapter`/`GoogleTasksAdapter`がそれぞれアカウント×カレンダー/タスクリストにまたがるTool呼び出しを`GwsCaller`経由で行う（`src/gws/fan_out.ts`が並列実行と失敗集約を担う共通ヘルパー）．Planning/Orchestration層のLLMには，Adapterが公開する正規化されたTool定義のみが見える．
 
 ---
 
@@ -244,16 +238,16 @@ Provider（Gemini等）ごとの差異を吸収する共通インターフェー
 
 MVPの時点からストリーミング表示に対応する．`streamText`を用い，LLMの応答を逐次CLIに出力する．
 
-### 5.3 MCP ToolとAI SDK Toolの結線方式
+### 5.3 gws ToolとAI SDK Toolの結線方式
 
-AI SDKには`@ai-sdk/mcp`というMCPクライアントが用意されており，MCPサーバーのToolをAI SDKの`tool()`形式へ自動変換できる．しかし，これを採用すると③で定義した`TaskService`/`CalendarService`という共通抽象化層を経由しなくなり，以下の点で当初の設計方針が損なわれる．
+gwsの生の出力（`calendar.events.list`のレスポンス封筒等，docs/spikes/gws-cli-0.22.5.md参照）をそのままAI SDKのTool結果として返すことも技術的には可能だが，それでは③で定義した`TaskService`/`CalendarService`という共通抽象化層を経由しなくなり，以下の点で当初の設計方針が損なわれる．
 
-- サービスの差し替え容易性が失われる（MCPサーバー固有のTool定義がそのままLLMに渡るため）
+- サービスの差し替え容易性が失われる（gws固有のレスポンス形状がそのままLLMに渡るため）
 - 統一されたTask/Event型が使われなくなる
-- 危険な操作の制限やパラメータ調整など，独自の絞り込みができなくなる
+- 危険な操作の制限やパラメータ調整（`sendUpdates: none`の強制等）など，独自の絞り込みができなくなる
 - テスト時にモックしづらくなる
 
-このため，**③で定義したAdapter（TaskService/CalendarService実装）を経由して，その関数を手動でAI SDKの`tool()`形式にラップする方式**を採用する．`@ai-sdk/mcp`による自動変換は使わない．
+このため，**③で定義したAdapter（TaskService/CalendarService実装）を経由して，その関数を手動でAI SDKの`tool()`形式にラップする方式**を採用する．Adapterの内部で`GwsCaller`（`src/gws/runner.ts`）を呼び出し，gwsの生レスポンスをAdapter内で正規化する．
 
 ```typescript
 const listTasksTool = tool({
@@ -301,9 +295,9 @@ const systemPrompt = `
 
 | ファイル | 配置場所 | 内容 |
 |---|---|---|
-| `.env` | プロジェクト実行ディレクトリ直下 | APIキー，OAuthクライアント情報等の機密情報 |
-| MCPサーバー起動設定 | `~/.config/satellite/` 配下 | 各MCPサーバーの起動コマンド・引数（`mcp_config.json`相当） |
-| 認証トークンキャッシュ | `~/.config/satellite/` 配下 | OAuth等の認証トークン |
+| `.env` | プロジェクト実行ディレクトリ直下 | APIキー，OAuthクライアント情報のパス等の機密情報 |
+| gws起動設定・アカウント一覧 | `~/.config/satellite/google_config.json` | `oauthClientFile`，任意の`gwsCommand`，`accounts`（各アカウントの`calendarIds`/`taskListIds`） |
+| 認証トークンキャッシュ | `~/.config/satellite/gws/<account>/`（パーミッション0700） | gwsのファイルキーリング（`.encryption_key`/`client_secret.json`/`credentials.enc`），アカウントごとに独立 |
 
 `.env`のみプロジェクト実行ディレクトリ直下に置き，それ以外のホスト環境に紐づく設定・キャッシュ類は`~/.config/satellite/`にまとめる．
 
@@ -322,7 +316,7 @@ const systemPrompt = `
 | ランタイム/パッケージ管理 | Bun |
 | 言語 | TypeScript |
 | LLM SDK | Vercel AI SDK（初期Provider: Gemini） |
-| MCP連携 | 独自Adapter経由（`@ai-sdk/mcp`は不使用） |
+| 外部サービス連携 | `bunx @googleworkspace/cli`（gws）を独自Adapter経由で呼び出す |
 | テストフレームワーク | `bun:test`（Bun組み込み） |
 | ライセンス | MIT |
 
@@ -335,17 +329,18 @@ const systemPrompt = `
 ```
 satellite/
 ├── src/
-│   ├── cli/            # ①CLI層: エントリポイント，対話ループ
+│   ├── cli/            # ①CLI層: エントリポイント，calendar_check/tasks_check/auth
 │   ├── planning/        # ①Planning/Orchestration層
 │   ├── skills/           # ②Skill層: description一覧の提示，本体読み込み
 │   ├── llm/               # ⑤LLM抽象化層: Vercel AI SDKラッパー，Provider設定
 │   ├── services/          # ③共通インターフェース: TaskService/CalendarService，Task/Event型
-│   ├── adapters/          # ③④Adapter実装（MCPサーバー種別ごと）
+│   ├── gws/                # ④gws連携層: GwsCaller/GwsProcessRunner，fan_out
+│   ├── adapters/          # ③④Adapter実装（サービス種別ごと，GwsCaller経由）
 │   │   ├── google-tasks/
 │   │   └── google-calendar/
-│   └── config/             # ⑦設定読み込み: .env，mcp_config.json，トークンキャッシュ
+│   └── config/             # ⑦設定読み込み: .env，google_config.json，アカウント設定ディレクトリ
 ├── *.test.ts               # 各モジュールに隣接させたテストファイル（bun:test）
-├── mcp_config.json.example # ④MCPサーバー起動設定のサンプル
+├── google_config.json.example # ④gws起動設定・アカウント一覧のサンプル
 ├── .env.example
 ├── README.md
 ├── design_doc.md

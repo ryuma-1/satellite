@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ToolExecutionOptions } from "ai";
 import type { ListTasksParams, Task, TaskService } from "../services/tasks";
 import { formatLocalDateTime } from "./datetime";
-import { createTaskTools, resolveTaskListIds, toTaskView } from "./task_tools";
+import { createTaskTools, resolveAccountTaskLists, toTaskView } from "./task_tools";
 
 /**
  * Records service calls and replies with fixed tasks, mirroring FakeCalendar in calendar_tools.test.ts.
@@ -71,12 +71,20 @@ describe("toTaskView", () => {
     expect(toTaskView({ ...openTask, taskListId: "work-list" }).taskListId).toBe("work-list");
     expect(toTaskView(openTask)).not.toHaveProperty("taskListId");
   });
+
+  test("tags the view with account when the task carries one", () => {
+    expect(toTaskView({ ...openTask, account: "school" }).account).toBe("school");
+    expect(toTaskView(openTask)).not.toHaveProperty("account");
+  });
 });
+
+/** A single account with just the default task list, used by tests that don't exercise multi-account scope. */
+const defaultOnly = [{ name: "acct", taskListIds: ["@default"] }];
 
 describe("createTaskTools", () => {
   test("list_tasks parses the range and completion filter, and returns views", async () => {
     const service = new FakeTaskService([openTask, doneTask]);
-    const tools = createTaskTools(service, ["@default"]);
+    const tools = createTaskTools(service, defaultOnly);
 
     const result = await run(tools, "list_tasks", {
       dueAfter: "2026-09-24T00:00:00+09:00",
@@ -95,7 +103,7 @@ describe("createTaskTools", () => {
 
   test("date-only dueBefore includes that entire day (inclusive semantics)", async () => {
     const service = new FakeTaskService([]);
-    const tools = createTaskTools(service, ["@default"]);
+    const tools = createTaskTools(service, defaultOnly);
 
     await run(tools, "list_tasks", { dueBefore: "2026-09-30" });
 
@@ -107,7 +115,7 @@ describe("createTaskTools", () => {
 
   test("timed dueBefore is passed through unchanged, relying on the adapter's own round-up", async () => {
     const service = new FakeTaskService([]);
-    const tools = createTaskTools(service, ["@default"]);
+    const tools = createTaskTools(service, defaultOnly);
 
     await run(tools, "list_tasks", { dueBefore: "2026-09-30T15:00:00+09:00" });
 
@@ -117,7 +125,7 @@ describe("createTaskTools", () => {
 
   test("timed dueBefore at exact local midnight is also passed through unchanged (excludes that day)", async () => {
     const service = new FakeTaskService([]);
-    const tools = createTaskTools(service, ["@default"]);
+    const tools = createTaskTools(service, defaultOnly);
     // Built from the host's own local offset (rather than a hardcoded "+09:00") so this exercises exact
     // local midnight regardless of which timezone the test runs in.
     const midnight = new Date(2026, 8, 30);
@@ -130,7 +138,7 @@ describe("createTaskTools", () => {
 
   test("date-only dueAfter is local midnight of that day (inclusive by construction)", async () => {
     const service = new FakeTaskService([]);
-    const tools = createTaskTools(service, ["@default"]);
+    const tools = createTaskTools(service, defaultOnly);
 
     await run(tools, "list_tasks", { dueAfter: "2026-09-24" });
 
@@ -140,7 +148,7 @@ describe("createTaskTools", () => {
 
   test("timed dueAfter keeps its own local date, still inclusive of that day", async () => {
     const service = new FakeTaskService([]);
-    const tools = createTaskTools(service, ["@default"]);
+    const tools = createTaskTools(service, defaultOnly);
 
     await run(tools, "list_tasks", { dueAfter: "2026-09-24T15:00:00+09:00" });
 
@@ -150,35 +158,49 @@ describe("createTaskTools", () => {
 
   test("list_tasks without filters passes undefined bounds and completed", async () => {
     const service = new FakeTaskService([openTask]);
-    await run(createTaskTools(service, ["@default"]), "list_tasks", {});
+    await run(createTaskTools(service, defaultOnly), "list_tasks", {});
     expect(service.calls[0]?.args[0]).toEqual({ dueBefore: undefined, dueAfter: undefined, completed: undefined });
   });
 
   test("rejects unparseable dates with a message the LLM can act on", async () => {
     const service = new FakeTaskService([openTask]);
-    const tools = createTaskTools(service, ["@default"]);
+    const tools = createTaskTools(service, defaultOnly);
     await expect(run(tools, "list_tasks", { dueAfter: "next friday" })).rejects.toThrow(/dueAfter.*ISO 8601/);
     expect(service.calls).toHaveLength(0);
   });
 
-  test("mentions every configured task list in the description only when there is more than one", () => {
-    const single = createTaskTools(new FakeTaskService([]), ["@default"]).list_tasks?.description ?? "";
-    const multi = createTaskTools(new FakeTaskService([]), ["@default", "work-list"]).list_tasks?.description ?? "";
-    expect(single).not.toContain("work-list");
-    expect(multi).toContain("@default, work-list");
+  test("mentions every account/task-list combination only when there is more than the single default", () => {
+    const single = createTaskTools(new FakeTaskService([]), defaultOnly).list_tasks?.description ?? "";
+    const multiList = createTaskTools(new FakeTaskService([]), [{ name: "acct", taskListIds: ["@default", "work-list"] }])
+      .list_tasks?.description ?? "";
+    const multiAccount = createTaskTools(new FakeTaskService([]), [
+      { name: "personal", taskListIds: ["@default"] },
+      { name: "school", taskListIds: ["@default"] },
+    ]).list_tasks?.description ?? "";
+
+    expect(single).not.toContain("Merges tasks across");
+    expect(multiList).toContain("acct: @default, work-list");
+    expect(multiAccount).toContain("personal: @default; school: @default");
   });
 });
 
-describe("resolveTaskListIds", () => {
-  test("prefixes extras with the default task list", () => {
-    expect(resolveTaskListIds(["work-list"], "@default")).toEqual(["@default", "work-list"]);
+describe("resolveAccountTaskLists", () => {
+  test("prefixes each account's extras with the default task list", () => {
+    const accountTaskLists = resolveAccountTaskLists(
+      [
+        { name: "personal", taskListIds: [] },
+        { name: "school", taskListIds: ["work-list"] },
+      ],
+      "@default",
+    );
+    expect(accountTaskLists).toEqual([
+      { name: "personal", taskListIds: ["@default"] },
+      { name: "school", taskListIds: ["@default", "work-list"] },
+    ]);
   });
 
-  test("returns only the default when no extras are configured", () => {
-    expect(resolveTaskListIds([], "@default")).toEqual(["@default"]);
-  });
-
-  test("de-duplicates ids", () => {
-    expect(resolveTaskListIds(["work-list", "work-list"], "@default")).toEqual(["@default", "work-list"]);
+  test("de-duplicates nothing beyond what the config layer already guarantees unique", () => {
+    const accountTaskLists = resolveAccountTaskLists([{ name: "acct", taskListIds: ["work-list"] }], "@default");
+    expect(accountTaskLists).toEqual([{ name: "acct", taskListIds: ["@default", "work-list"] }]);
   });
 });

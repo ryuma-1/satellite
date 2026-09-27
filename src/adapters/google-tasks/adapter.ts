@@ -1,4 +1,5 @@
-import type { McpToolCaller } from "../../mcp/client";
+import { fanOut } from "../../gws/fan_out";
+import type { GwsCaller } from "../../gws/runner";
 import type { ListTasksParams, Task, TaskService } from "../../services/tasks";
 import { toDueMaxTimestamp, toDueTimestamp, toTask } from "./mapper";
 
@@ -9,168 +10,112 @@ import { toDueMaxTimestamp, toDueTimestamp, toTask } from "./mapper";
 export const DEFAULT_TASK_LIST_ID = "@default";
 
 /**
- * Tasks requested per page; the server caps google_tasks_list_tasks's `limit` at 100.
+ * An account and the extra task lists it owns, as configured for GoogleTasksAdapter. Mirrors
+ * GoogleCalendarAccount's role for GoogleCalendarAdapter (design decision, issue #5).
  */
-const PAGE_LIMIT = 100;
-
-/**
- * Smallest `limit` retried down to when the server truncates a page's rendering (see listTasksPage);
- * the server itself requires at least 1.
- */
-const MIN_PAGE_LIMIT = 1;
+export interface GoogleTasksAccount {
+  /** Account nickname; must match a gws config directory set up via `bun run src/cli/auth.ts <name>`. */
+  name: string;
+  /** Additional task list ids read alongside this account's default list ("@default"). */
+  taskListIds?: string[];
+}
 
 /**
  * Options for GoogleTasksAdapter.
  */
 export interface GoogleTasksAdapterOptions {
   /**
-   * Additional task list ids read alongside the default list ("@default"). Empty when only the default
-   * list is used. Unlike GoogleCalendarAdapter, there is no accounts concept here: every configured task
-   * list belongs to the single account this MCP server is authenticated as (design decision, issue #3).
+   * Accounts to query, each with its own extra task lists. At least one is required (named-account mode is
+   * mandatory, mirroring GoogleCalendarAdapter). A plain string is shorthand for an account with no extras.
    */
-  taskListIds?: string[];
+  accounts: (string | GoogleTasksAccount)[];
 }
 
 /**
- * TaskService backed by @girmmy/google-tasks-mcp-server. Read-only (list only); creation, update and
- * deletion are out of scope for this iteration.
+ * TaskService backed by the gws CLI (docs/spikes/gws-cli-0.22.5.md), spanning one or more Google accounts and
+ * task lists via GwsCaller. Read-only (list only); creation, update and deletion are out of scope for this
+ * iteration.
  */
 export class GoogleTasksAdapter implements TaskService {
-  /** Additional task list ids queried alongside DEFAULT_TASK_LIST_ID (see GoogleTasksAdapterOptions). */
-  private readonly taskListIds: string[];
+  private readonly accounts: Required<GoogleTasksAccount>[];
 
   /**
-   * @param caller Connection used to invoke the server's tools.
+   * @param caller Runs gws calls for a given account.
    */
   constructor(
-    private readonly caller: McpToolCaller,
-    options: GoogleTasksAdapterOptions = {},
+    private readonly caller: GwsCaller,
+    options: GoogleTasksAdapterOptions,
   ) {
-    this.taskListIds = options.taskListIds ?? [];
+    this.accounts = options.accounts.map((a) =>
+      typeof a === "string" ? { name: a, taskListIds: [] } : { name: a.name, taskListIds: a.taskListIds ?? [] },
+    );
+    if (this.accounts.length === 0) {
+      throw new Error("GoogleTasksAdapter requires at least one account");
+    }
   }
 
   /**
-   * Lists tasks via "google_tasks_list_tasks", once per configured task list ("@default" plus any extras),
-   * and merges the results (calendar's Promise.allSettled + failure-aggregation pattern).
-   * The server's show_completed flag can only include or exclude completed tasks, not select only them,
-   * so every call always requests everything (show_completed: true, show_deleted/show_hidden: false) and
-   * `params.completed` is applied here afterward instead.
+   * Lists tasks via `tasks tasks list`, once per account/task-list pair ("@default" plus any extras), and
+   * merges the results (mirrors GoogleCalendarAdapter.listEvents's fan-out pattern).
+   * gws has no "completed only" mode, so every call always requests everything
+   * (showCompleted: true, showDeleted/showHidden: false) and `params.completed` is applied here afterward.
    */
   async listTasks(params: ListTasksParams = {}): Promise<Task[]> {
-    const targets = [DEFAULT_TASK_LIST_ID, ...this.taskListIds];
-    const results = await Promise.allSettled(targets.map((taskListId) => this.listTasksFor(taskListId, params)));
-
-    const failures = results.flatMap((r, i) => {
-      if (r.status !== "rejected") return [];
-      return [`${targets[i]}: ${(r.reason as Error).message}`];
-    });
-    // Returning only the successful task lists would silently hide tasks, so any failure fails the call.
-    if (failures.length > 0) {
-      throw new Error(`google_tasks_list_tasks failed for ${failures.length} task list(s):\n${failures.join("\n")}`);
-    }
-
-    const tasks = results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+    const targets = this.accounts.flatMap((account) =>
+      [DEFAULT_TASK_LIST_ID, ...account.taskListIds].map((taskListId) => ({ account: account.name, taskListId })),
+    );
+    const tasks = await fanOut(
+      targets,
+      (t) => `${t.account}/${t.taskListId}`,
+      (t) => this.listTasksFor(t.account, t.taskListId, params),
+    );
     return params.completed === undefined ? tasks : tasks.filter((t) => t.completed === params.completed);
   }
 
   /**
-   * Fetches and converts every page of tasks for a single task list, following `next_page_token` until
-   * `has_more` reports none left.
+   * Fetches and converts every page of tasks for a single account/task-list pair.
    */
-  private async listTasksFor(taskListId: string, params: ListTasksParams): Promise<Task[]> {
-    const taggedTaskListId = this.taggedTaskListId(taskListId);
-    const tasks: Task[] = [];
-    let pageToken: string | undefined;
-    do {
-      const page = await this.listTasksPage(taskListId, params, pageToken);
-      for (const raw of page.tasks) tasks.push(toTask(raw, taggedTaskListId));
-      pageToken = page.has_more ? page.next_page_token : undefined;
-    } while (pageToken !== undefined);
-    return tasks;
+  private async listTasksFor(account: string, taskListId: string, params: ListTasksParams): Promise<Task[]> {
+    const pages = await this.caller.callAllPages(account, {
+      path: ["tasks", "tasks", "list"],
+      params: {
+        tasklist: taskListId,
+        showCompleted: true,
+        showDeleted: false,
+        showHidden: false,
+        ...(params.dueAfter && { dueMin: toDueTimestamp(params.dueAfter) }),
+        ...(params.dueBefore && { dueMax: toDueMaxTimestamp(params.dueBefore) }),
+      },
+    });
+    const label = `${account}/${taskListId}`;
+    const tagged = this.taggedTaskListId(account, taskListId);
+    return pages.flatMap((page) => expectItems(page, "tasks.tasks.list", label)).map((raw) => toTask(raw, account, tagged));
   }
 
   /**
-   * Calls "google_tasks_list_tasks" for one page and validates the response shape.
-   * The server can locally truncate a page (halving its `tasks` array, independently of Google's own
-   * `next_page_token` pagination) whenever the rendered markdown for the full page would exceed its
-   * character limit, without ever indicating *which* items it dropped. Silently accepting a truncated
-   * page would lose those tasks for good (no cursor exists to resume mid-page), so on truncation this
-   * retries the same page with a smaller `limit` until the whole page's rendering fits, or fails loudly
-   * once `limit` can no longer be lowered.
+   * Returns taskListId only when `account` has extra task lists configured, keeping TaskView minimal for the
+   * common single-list setup, mirroring GoogleCalendarAdapter's taggedCalendarId.
    */
-  private async listTasksPage(
-    taskListId: string,
-    params: ListTasksParams,
-    pageToken: string | undefined,
-  ): Promise<TasksPage> {
-    let limit = PAGE_LIMIT;
-    for (;;) {
-      const result = await this.caller.callTool("google_tasks_list_tasks", {
-        tasklist_id: taskListId,
-        limit,
-        show_completed: true,
-        show_deleted: false,
-        show_hidden: false,
-        ...(pageToken !== undefined && { page_token: pageToken }),
-        ...(params.dueAfter && { due_min: toDueTimestamp(params.dueAfter) }),
-        ...(params.dueBefore && { due_max: toDueMaxTimestamp(params.dueBefore) }),
-      });
-      const page = expectTasksPage(result, taskListId);
-      if (!page.truncated) return page;
-      if (limit <= MIN_PAGE_LIMIT) {
-        throw new Error(
-          `google_tasks_list_tasks: task list "${taskListId}" kept truncating its response even at ` +
-            `limit=${MIN_PAGE_LIMIT}; a single task's rendered content is too large to fetch safely`,
-        );
-      }
-      limit = Math.max(MIN_PAGE_LIMIT, Math.floor(limit / 2));
-    }
-  }
-
-  /**
-   * Returns taskListId only when extra task lists are configured, keeping TaskView minimal for the common
-   * single-list setup, mirroring how GoogleCalendarAdapter only tags calendarId when extra calendars exist.
-   */
-  private taggedTaskListId(taskListId: string): string | undefined {
-    return this.taskListIds.length > 0 ? taskListId : undefined;
+  private taggedTaskListId(account: string, taskListId: string): string | undefined {
+    const found = this.accounts.find((a) => a.name === account);
+    return (found?.taskListIds.length ?? 0) > 0 ? taskListId : undefined;
   }
 }
 
 /**
- * Shape of google_tasks_list_tasks's structuredContent that the adapter consumes.
+ * Extracts and validates the `items` array from one page of `tasks.tasks.list`'s response envelope.
+ * `items` is absent from the Tasks API discovery schema's required fields, so a page with no matching
+ * tasks can omit it entirely rather than sending an empty array (docs/spikes/gws-cli-0.22.5.md §6); that
+ * case is treated as zero tasks rather than an error.
  */
-interface TasksPage {
-  /** Raw task resources for this page (only the ones the server kept, when `truncated` is true). */
-  tasks: unknown[];
-  /** True when there is a further page to fetch, from either Google's own pagination or local truncation. */
-  has_more: boolean;
-  /** Opaque cursor for Google's own next page; present only when Google itself has more results. */
-  next_page_token?: string;
-  /**
-   * True when the server dropped some of this page's tasks to keep its rendered markdown under its
-   * character limit (surfaced as a `truncation_message` in the raw response). listTasksPage retries
-   * with a smaller `limit` whenever this is set, so callers of listTasksPage should never see it set.
-   */
-  truncated: boolean;
-}
-
-/**
- * Extracts and validates a list-tasks page from a tool result, failing loudly if the response shape changed.
- */
-function expectTasksPage(result: unknown, taskListId: string): TasksPage {
-  if (typeof result !== "object" || result === null || !("tasks" in result) || !("has_more" in result)) {
-    throw new Error(
-      `google_tasks_list_tasks: unexpected response for task list "${taskListId}": ${JSON.stringify(result)}`,
-    );
+function expectItems(page: unknown, tool: string, label: string): unknown[] {
+  if (typeof page !== "object" || page === null) {
+    throw new Error(`${tool}: unexpected response for ${label}: ${JSON.stringify(page)}`);
   }
-  const r = result as Record<string, unknown>;
-  if (!Array.isArray(r.tasks)) {
-    throw new Error(`google_tasks_list_tasks: "tasks" is not an array for task list "${taskListId}"`);
+  const items = (page as Record<string, unknown>).items;
+  if (items === undefined) return [];
+  if (!Array.isArray(items)) {
+    throw new Error(`${tool}: "items" is not an array for ${label}`);
   }
-  return {
-    tasks: r.tasks,
-    has_more: r.has_more === true,
-    next_page_token: typeof r.next_page_token === "string" ? r.next_page_token : undefined,
-    truncated: typeof r.truncation_message === "string",
-  };
+  return items;
 }
