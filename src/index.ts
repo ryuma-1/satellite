@@ -1,12 +1,22 @@
 import { DEFAULT_CALENDAR_ID, GoogleCalendarAdapter } from "./adapters/google-calendar/adapter";
 import { DEFAULT_TASK_LIST_ID, GoogleTasksAdapter } from "./adapters/google-tasks/adapter";
 import { loadGoogleConfig, loadOAuthClient } from "./config/google_config";
+import { loadScheduleConfig } from "./config/schedule_config";
 import { GwsProcessRunner } from "./gws/runner";
 import { createModel } from "./llm/model";
 import { runAgent } from "./planning/agent";
 import { createCalendarTools, resolveCalendarIds } from "./planning/calendar_tools";
+import { createConfirmationTools } from "./planning/confirmation_tools";
 import { buildSystemPrompt, resolveAccountCalendars } from "./planning/system_prompt";
 import { createTaskTools, resolveAccountTaskLists } from "./planning/task_tools";
+
+/**
+ * Upper bound on model steps for one runAgent call. Raised above runAgent's own default of 10: creating a
+ * task now typically spans list_tasks (duplicate check), suggest_due_date (which itself calls list_tasks and
+ * list_events), request_confirmation, and one create_task call per subtask, before the final text answer
+ * (implementation plan, issue #7, "maxSteps 不足の可能性").
+ */
+const MAX_AGENT_STEPS = 20;
 
 /**
  * Answers one natural-language request, letting the LLM call calendar and task tools as needed.
@@ -26,6 +36,7 @@ async function main() {
   const model = createModel();
   const config = await loadGoogleConfig();
   const oauthClient = await loadOAuthClient(config.oauthClientFile);
+  const schedule = await loadScheduleConfig();
   const runner = new GwsProcessRunner({ gwsCommand: config.gwsCommand, oauthClient });
 
   const accountNames = config.accounts.map((a) => a.name);
@@ -40,7 +51,8 @@ async function main() {
 
   const tools = {
     ...createCalendarTools(calendar, accountNames, calendarIds),
-    ...createTaskTools(tasks, accountTaskLists),
+    ...createTaskTools(tasks, accountTaskLists, calendar, { workingHours: schedule.workingHours }),
+    ...createConfirmationTools(),
   };
 
   const answer = runAgent({
@@ -48,6 +60,7 @@ async function main() {
     tools,
     instructions: buildSystemPrompt({ now: new Date(), accounts: accountNames, accountCalendars, accountTaskLists }),
     prompt: question,
+    maxSteps: MAX_AGENT_STEPS,
     onToolError: (toolName, error) => {
       console.error(`[tool ${toolName}] ${error instanceof Error ? error.message : String(error)}`);
     },

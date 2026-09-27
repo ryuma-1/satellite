@@ -25,7 +25,18 @@ export interface Task {
    * Undefined when the service is only configured with its default task list.
    */
   taskListId?: string;
+  /** Id of the parent task, when this task is a subtask (Google Tasks' own parent/child relationship). */
+  parent?: string;
 }
+
+/**
+ * Input for creating a task. `account` defaults to the service's default account; `taskListId` defaults to
+ * the service's default task list (mirrors NewCalendarEvent's role for calendar events). Passing `parent`
+ * creates the task as a subtask of an existing task, which is how large tasks are split into subtasks
+ * (design decision, issue #7: splitting is expressed via Google Tasks' own parent/child relationship rather
+ * than a bespoke concept).
+ */
+export type NewTask = Omit<Task, "id" | "completed">;
 
 /**
  * Filter for listing tasks. All fields are optional so callers can query an unfiltered list.
@@ -52,10 +63,12 @@ export interface ListTasksParams {
 }
 
 /**
- * Read-only access to a user's tasks, exposed to the LLM as a tool (see design_doc, extended for issue #3).
- * Creation, update and deletion are out of scope for this iteration.
+ * Access to a user's tasks, exposed to the LLM as tools (see design_doc, extended for issue #3 then #7).
+ * Creation is supported via createTask (issue #7); update and deletion remain out of scope.
  */
 export interface TaskService {
   /** Lists tasks matching the given filter, merged across all configured task lists. */
   listTasks(params?: ListTasksParams): Promise<Task[]>;
+  /** Creates a task and returns it as stored by the service. */
+  createTask(task: NewTask): Promise<Task>;
 }

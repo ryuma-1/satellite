@@ -1,4 +1,4 @@
-import type { Task } from "../../services/tasks";
+import type { NewTask, Task } from "../../services/tasks";
 
 /**
  * Raw task resource as returned in Google Tasks API's `items[]` (via `gws tasks tasks list`); identical shape
@@ -38,9 +38,23 @@ export function toTask(raw: unknown, account?: string, taskListId?: string): Tas
   };
   if (raw.due !== undefined) task.due = parseDueDate(raw.due);
   if (raw.notes !== undefined) task.notes = raw.notes;
+  if (raw.parent !== undefined) task.parent = raw.parent;
   if (account !== undefined) task.account = account;
   if (taskListId !== undefined) task.taskListId = taskListId;
   return task;
+}
+
+/**
+ * Converts a NewTask into the request body for `tasks.tasks.insert`.
+ * `parent` is intentionally excluded: Google Tasks' `insert` takes the parent id as a query parameter of the
+ * method itself, not a field of the Task resource body (docs/spikes/gws-cli-0.22.5.md §11, not yet verified
+ * against a real account), so the adapter attaches it to the request's `params` instead of this body.
+ */
+export function toInsertBody(task: NewTask): Record<string, unknown> {
+  const body: Record<string, unknown> = { title: task.title };
+  if (task.notes !== undefined) body.notes = task.notes;
+  if (task.due !== undefined) body.due = toDueTimestamp(task.due);
+  return body;
 }
 
 /**
