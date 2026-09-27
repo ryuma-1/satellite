@@ -4,8 +4,10 @@
 
 /**
  * Matches a date-only value, which is interpreted as local midnight like the calendar mapper does.
+ * Exported so callers that must tell a date-only input apart from a timed one (e.g. task_tools' dueBefore,
+ * where both parse to the identical local-midnight Date) can still see the original string shape.
  */
-const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+export const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /**
  * Parses an ISO 8601 date or date-time string from tool input.

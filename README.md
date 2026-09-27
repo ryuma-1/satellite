@@ -1,6 +1,6 @@
 # satellite
 
-MCP (Model Context Protocol) を介して外部サービス（タスク管理・カレンダーなど）と連携し、ユーザーの状況を踏まえた提案を行う AI Assistant CLI ツールです。
+Google Workspace CLI（gws）を介して外部サービス（タスク管理・カレンダーなど）と連携し、ユーザーの状況を踏まえた提案を行う AI Assistant CLI ツールです。
 
 > **Status**: 構想・設計段階。本READMEは実装前の企画書的な位置づけです。
 
@@ -11,14 +11,14 @@ MCP (Model Context Protocol) を介して外部サービス（タスク管理・
 - [コンセプト](#コンセプト)
 - [アーキテクチャ](#アーキテクチャ)
 - [技術スタック](#技術スタック)
-- [セットアップ（予定）](#セットアップ予定)
+- [セットアップ](#セットアップ)
 - [設定](#設定)
 - [ロードマップ](#ロードマップ)
 - [ライセンス](#ライセンス)
 
 ## 概要
 
-satellite は、LLM を中核に据えつつ、タスク管理サービスやカレンダーサービスといった外部ツールを **MCP 経由で** 利用する AI Assistant です。単なる「AIからカレンダーを操作できるツール」ではなく、複数のサービスから取得した情報を組み合わせて状況を理解し、次に取るべき行動を提案することを目指します。
+satellite は、LLM を中核に据えつつ、タスク管理サービスやカレンダーサービスといった外部ツールを **gws CLI 経由で** 利用する AI Assistant です。単なる「AIからカレンダーを操作できるツール」ではなく、複数のサービスから取得した情報を組み合わせて状況を理解し、次に取るべき行動を提案することを目指します。
 
 例えば、以下のような情報を統合し、
 
@@ -43,12 +43,12 @@ Calendar
 ## コンセプト
 
 ```
-LLM + Tool利用(MCP) + 状況理解 + Planning
+LLM + Tool利用(gws) + 状況理解 + Planning
 ```
 
 - **特定サービスに依存しない**: タスク管理・カレンダーそれぞれについて、具体的なサービス（Google Tasks / Todoist / Google Calendar など）を共通インターフェースの背後に隠蔽する。
 - **特定LLMに依存しない**: LLM 呼び出し部分も抽象化レイヤーを設け、Provider を差し替え可能にする。
-- **既存資産の活用**: MCPサーバーは可能な限り既存の公開実装（Google Calendar MCP など）を再利用し、自作は最小限に留める。
+- **既存資産の活用**: 外部サービスとの通信は既存の公開実装（Google 公式の Google Workspace CLI など）を再利用し、自作は最小限に留める。
 
 ## アーキテクチャ
 
@@ -58,23 +58,24 @@ LLM + Tool利用(MCP) + 状況理解 + Planning
                        LLM
                     (Provider抽象化)
                          │
-                  MCP Client Layer
-                         │
         ┌────────────────┴────────────────┐
         ▼                                  ▼
    Task Interface                   Calendar Interface
    (サービス抽象化)                   (サービス抽象化)
-        │                                  │
-   ┌────┼────┐                        ┌────┴────┐
-   ▼    ▼    ▼                        ▼         ▼
-Todoist GTasks Notion              Google    Outlook
-  MCP    MCP    MCP                Calendar    Calendar
-                                     MCP         MCP
+        └────────────────┬────────────────┘
+                         ▼
+                      gws連携層
+            (Google Workspace CLI を都度起動)
+                         │
+        ┌────────────────┴────────────────┐
+        ▼                                  ▼
+   Google Tasks                     Google Calendar
+   (複数アカウント)                   (複数アカウント)
 ```
 
 - **AI Assistant (CLI)**: ターミナルから対話する形式のエントリポイント。
 - **LLM layer**: 特定モデルに依存しない抽象化レイヤー。初期実装は Gemini を対象とする。
-- **MCP Client Layer**: 各種 MCP サーバーと通信し、Tool として LLM に提供する層。
+- **gws連携層**: `bunx @googleworkspace/cli`（gws）を呼び出しごとに起動し、Google Tasks / Google Calendar にアクセスする層。アカウントごとに設定ディレクトリを分け、複数アカウントの予定・タスクをまとめて取得する。
 - **Task / Calendar Interface**: 個別サービスの違いを吸収する抽象化層。MVP では Task・Calendar の両方を対象とする。
 
 ## 技術スタック
@@ -83,43 +84,74 @@ Todoist GTasks Notion              Google    Outlook
 |---|---|
 | 言語 | TypeScript |
 | ランタイム / パッケージ管理 | Bun |
-| 外部連携 | MCP (Model Context Protocol) |
+| 外部連携 | Google Workspace CLI（`@googleworkspace/cli`） |
 | LLM (初期対応) | Gemini |
 | 実行形態 | CLI |
 | 想定利用者 | 個人利用 |
 
-## セットアップ（予定）
-
-> 実装前のため、以下は想定であり今後変更の可能性があります。
+## セットアップ
 
 ```bash
 git clone https://github.com/<your-account>/satellite.git
 cd satellite
 bun install
 cp .env.example .env
-# .env にAPIキー・MCPサーバー接続情報を設定
-bun run start
+# .env に APIキーと OAuth クライアント JSON のパスを設定
+mkdir -p ~/.config/satellite
+cp google_config.json.example ~/.config/satellite/google_config.json
+# google_config.json に利用するアカウントを設定
+
+# アカウントごとに一度だけ認証する（ブラウザで OAuth を承認）
+bun run src/cli/auth.ts <account>
+
+# 動作確認
+bun run src/cli/calendar_check.ts 7
+bun run src/cli/tasks_check.ts
+
+# 実行
+bun run src/index.ts 今週の予定とタスクを教えて
 ```
+
+OAuth クライアント JSON は、Google Cloud Console で作成した「デスクトップ アプリ」の OAuth クライアント（`installed` 形式）をダウンロードしたものを使います。
 
 ## 設定
 
-APIキーおよび MCP サーバーの接続情報は環境変数 (`.env`) で管理します。
+APIキーおよび OAuth クライアントのパスは環境変数 (`.env`) で管理します。
 
 ```env
 # LLM
 GEMINI_API_KEY=
 
-# MCP servers
-GOOGLE_CALENDAR_MCP_ENDPOINT=
-# 他サービスのMCPサーバー接続情報を追加
+# Google Cloud Console からダウンロードした OAuth クライアント JSON の絶対パス
+GOOGLE_OAUTH_CREDENTIALS=/path/to/gcp-oauth.keys.json
 ```
+
+利用する Google アカウントは `~/.config/satellite/google_config.json` で設定します（`google_config.json.example` を参照）。
+
+```json
+{
+  "oauthClientFile": "${GOOGLE_OAUTH_CREDENTIALS}",
+  "accounts": [
+    "personal",
+    {
+      "name": "school",
+      "calendarIds": ["your-shared-calendar-id@group.calendar.google.com"],
+      "taskListIds": ["your-task-list-id"]
+    }
+  ]
+}
+```
+
+- `accounts`: 1 件以上必須。文字列はアカウント名のみ（primary カレンダーと既定のタスクリストを使用）、オブジェクトでは追加のカレンダー ID（`calendarIds`）やタスクリスト ID（`taskListIds`）を指定できる。共有カレンダーは、それを所有・購読しているアカウントの下に書く。
+- `gwsCommand`（任意）: gws の起動コマンドを argv 配列で上書きする（既定は `["bunx", "@googleworkspace/cli@0.22.5"]`）。
+- 認証情報はアカウントごとに `~/.config/satellite/gws/<account>/` に保存される。
 
 ## ロードマップ
 
 - [ ] Task / Calendar の共通インターフェース設計
-- [ ] MCP Client Layer の実装
+- [x] gws連携層の実装
 - [ ] Gemini を用いたLLM抽象化層の実装
-- [ ] Google Calendar MCP との連携確認
+- [x] Google Calendar / Google Tasks との連携確認（複数アカウント対応）
 - [ ] タスク×スケジュールを踏まえた提案ロジックの実装
 - [ ] CLI としてのUX整備
 - [ ] 他LLM Provider・他サービスへの対応拡大

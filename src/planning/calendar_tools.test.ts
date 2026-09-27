@@ -222,7 +222,6 @@ describe("resolveCalendarIds", () => {
         { name: "personal", calendarIds: ["work@example.com"] },
         { name: "school", calendarIds: ["nomura.laboratory@gmail.com"] },
       ],
-      [],
       "primary",
     );
     expect(ids).toEqual(["primary", "work@example.com", "nomura.laboratory@gmail.com"]);
@@ -234,24 +233,14 @@ describe("resolveCalendarIds", () => {
         { name: "personal", calendarIds: ["shared@example.com"] },
         { name: "school", calendarIds: ["shared@example.com"] },
       ],
-      [],
       "primary",
     );
     expect(ids).toEqual(["primary", "shared@example.com"]);
   });
 
-  test("falls back to the unnamed calendarIds when there are no accounts", () => {
-    const ids = resolveCalendarIds([], ["work@example.com", "family@group.calendar.google.com"], "primary");
-    expect(ids).toEqual(["primary", "work@example.com", "family@group.calendar.google.com"]);
-  });
-
-  test("ignores the unnamed calendarIds once accounts are configured", () => {
-    const ids = resolveCalendarIds(
-      [{ name: "personal", calendarIds: ["work@example.com"] }],
-      ["should-be-ignored@example.com"],
-      "primary",
-    );
-    expect(ids).toEqual(["primary", "work@example.com"]);
+  test("returns just the default calendar when no account has extras", () => {
+    const ids = resolveCalendarIds([{ name: "personal", calendarIds: [] }], "primary");
+    expect(ids).toEqual(["primary"]);
   });
 
   test("the resulting calendarId enum offered to the LLM contains the union", () => {
@@ -260,7 +249,6 @@ describe("resolveCalendarIds", () => {
         { name: "personal", calendarIds: ["work@example.com"] },
         { name: "school", calendarIds: ["nomura.laboratory@gmail.com"] },
       ],
-      [],
       "primary",
     );
     const schema = createCalendarTools(new FakeCalendar(timedEvent), ["personal", "school"], calendarIds).delete_event

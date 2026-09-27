@@ -1,0 +1,11 @@
+{
+  "oauthClientFile": "${GOOGLE_OAUTH_CREDENTIALS}",
+  "accounts": [
+    "personal",
+    {
+      "name": "school",
+      "calendarIds": ["your-shared-calendar-id@group.calendar.google.com"],
+      "taskListIds": ["your-task-list-id"]
+    }
+  ]
+}
