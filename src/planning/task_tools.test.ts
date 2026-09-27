@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ToolExecutionOptions } from "ai";
 import { z } from "zod";
+import type { WorkingHours } from "../config/schedule_config";
 import type {
   CalendarEvent,
   CalendarEventPatch,
@@ -306,7 +307,7 @@ describe("createTaskTools", () => {
       const service = new FakeTaskService([]);
       const calendar = new FakeCalendarService([]);
       const fixedNow = new Date(2026, 8, 25, 9, 0, 0);
-      const tools = createTaskTools(service, defaultOnly, calendar, () => fixedNow);
+      const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow });
 
       const result = await run(tools, "suggest_due_date", {});
 
@@ -336,7 +337,7 @@ describe("createTaskTools", () => {
       ];
       const calendar = new FakeCalendarService(busyEvents);
       const fixedNow = new Date(2026, 8, 25, 9, 0, 0);
-      const tools = createTaskTools(service, defaultOnly, calendar, () => fixedNow);
+      const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow });
 
       const result = await run(tools, "suggest_due_date", { estimatedHours: 1, searchDays: 1 });
 
@@ -348,6 +349,21 @@ describe("createTaskTools", () => {
       // ...and in the result: with only one (fully booked) candidate day in range, it is returned as the
       // fallback rather than searching further into the default 14-day window.
       expect(result).toEqual({ due: "2026-09-28", freeHours: 0, tasksDueThatDay: 0 });
+    });
+
+    test("schedules into the configured workingHours, for both the fetch window and the result", async () => {
+      const service = new FakeTaskService([]);
+      const calendar = new FakeCalendarService([]);
+      const fixedNow = new Date(2026, 8, 25, 9, 0, 0);
+      // Saturday-only working time (10:00-12:00), so the first candidate is tomorrow, Saturday 2026-09-26.
+      const onlySaturday: WorkingHours = [[], [], [], [], [], [], [{ startMinutes: 600, endMinutes: 720 }]];
+      const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow, workingHours: onlySaturday });
+
+      const result = await run(tools, "suggest_due_date", { searchDays: 1 });
+
+      const range = computeSearchRange(fixedNow, 1, onlySaturday);
+      expect(calendar.calls).toEqual([{ method: "listEvents", args: [{ from: range.start, to: range.end }] }]);
+      expect(result).toEqual({ due: "2026-09-26", freeHours: 2, tasksDueThatDay: 0 });
     });
   });
 });

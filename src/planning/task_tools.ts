@@ -1,5 +1,6 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
+import { DEFAULT_WORKING_HOURS, type WorkingHours } from "../config/schedule_config";
 import type { CalendarService } from "../services/calendar";
 import type { NewTask, Task, TaskService } from "../services/tasks";
 import { DATE_ONLY, formatLocalDate, parseDateInput } from "./datetime";
@@ -151,21 +152,35 @@ function taskListIdShape(taskListIds: string[], purpose: string): TaskListIdShap
 }
 
 /**
+ * Optional settings for createTaskTools.
+ */
+export interface TaskToolsOptions {
+  /**
+   * Returns the current time; injectable so suggest_due_date is deterministic in tests. Defaults to the real
+   * current time.
+   */
+  now?: () => Date;
+  /** The user's working time (schedule_config.json) suggest_due_date schedules into; defaults to Mon-Fri 9-18. */
+  workingHours?: WorkingHours;
+}
+
+/**
  * Wraps TaskService as AI SDK tools (design_doc §5.3 pattern, extended for issue #3/#5, then #7 for
  * create_task/suggest_due_date), instead of exposing gws directly. update_task/delete_task remain out of scope.
  * @param accountTaskLists Every account's task lists (default plus configured extras), from
  * resolveAccountTaskLists; mentioned in tool descriptions/schemas only when there is more than one to disambiguate.
  * @param calendarService Used by suggest_due_date to read calendar availability; not otherwise exposed here
  * (list_events/create_event etc. are createCalendarTools' responsibility).
- * @param now Returns the current time; injectable so suggest_due_date is deterministic in tests. Defaults to
- * the real current time.
+ * @param options See TaskToolsOptions.
  */
 export function createTaskTools(
   service: TaskService,
   accountTaskLists: AccountTaskLists[],
   calendarService: CalendarService,
-  now: () => Date = () => new Date(),
+  options: TaskToolsOptions = {},
 ): ToolSet {
+  const now = options.now ?? (() => new Date());
+  const workingHours = options.workingHours ?? DEFAULT_WORKING_HOURS;
   const scopeHint = describeScope(accountTaskLists);
   const accounts = accountTaskLists.map((a) => a.name);
   const taskListIds = [...new Set(accountTaskLists.flatMap((a) => a.taskListIds))];
@@ -253,19 +268,21 @@ export function createTaskTools(
           .positive()
           .optional()
           .describe(
-            `Number of candidate weekdays (Mon-Fri; weekends are never suggested) to search ahead for a ` +
-              `candidate; defaults to ${DEFAULT_SEARCH_DAYS}.`,
+            `Number of candidate working days (days without configured working hours are never suggested) ` +
+              `to search ahead for a candidate; defaults to ${DEFAULT_SEARCH_DAYS}.`,
           ),
       }),
       execute: async ({ estimatedHours, searchDays }) => {
         // Bounds the calendar/task fetch to exactly the window suggestDueDate can draw a candidate from,
         // instead of an unfiltered fetch that would page through a user's entire event/task history.
-        const range = computeSearchRange(now(), searchDays);
+        // Read the clock once so the fetch window and the candidate walk cannot disagree across midnight.
+        const current = now();
+        const range = computeSearchRange(current, searchDays, workingHours);
         const [tasks, events] = await Promise.all([
           service.listTasks({ dueAfter: range.start, dueBefore: range.end, completed: false }),
           calendarService.listEvents({ from: range.start, to: range.end }),
         ]);
-        const suggestion = suggestDueDate({ now: now(), events, tasks, estimatedHours, searchDays });
+        const suggestion = suggestDueDate({ now: current, events, tasks, estimatedHours, searchDays, workingHours });
         return {
           due: formatLocalDate(suggestion.date),
           freeHours: suggestion.freeHours,

@@ -1,9 +1,11 @@
+import { DEFAULT_WORKING_HOURS, type WorkingHours, type WorkingRange } from "../config/schedule_config";
 import type { CalendarEvent } from "../services/calendar";
 import type { Task } from "../services/tasks";
 
 /**
- * Number of candidate weekdays (Mon-Fri) searched for a due-date candidate when the caller does not
- * override it. Weekends are skipped entirely (see isWeekend), so this counts working days, not calendar days.
+ * Number of candidate working days searched for a due-date candidate when the caller does not override it.
+ * Days with no working time (see WorkingHours) are skipped entirely, so this counts working days, not
+ * calendar days.
  */
 export const DEFAULT_SEARCH_DAYS = 14;
 
@@ -13,14 +15,9 @@ export const DEFAULT_SEARCH_DAYS = 14;
 export const DEFAULT_ESTIMATED_HOURS = 1;
 
 /**
- * Local hour a working day starts, used to compute a candidate day's free time.
+ * Milliseconds per hour, for converting overlap durations into the hours reported to callers.
  */
-export const WORKING_HOURS_START = 9;
-
-/**
- * Local hour a working day ends (exclusive), used to compute a candidate day's free time.
- */
-export const WORKING_HOURS_END = 18;
+const MS_PER_HOUR = 60 * 60 * 1000;
 
 /**
  * Maximum number of existing, incomplete tasks already due on a candidate day before it is skipped as
@@ -40,8 +37,10 @@ export interface SuggestDueDateInput {
   tasks: Task[];
   /** Estimated hours the new task will take; defaults to DEFAULT_ESTIMATED_HOURS. */
   estimatedHours?: number;
-  /** Number of candidate weekdays to search; defaults to DEFAULT_SEARCH_DAYS. */
+  /** Number of candidate working days to search; defaults to DEFAULT_SEARCH_DAYS. */
   searchDays?: number;
+  /** The user's working time per weekday (schedule_config.json); defaults to DEFAULT_WORKING_HOURS. */
+  workingHours?: WorkingHours;
 }
 
 /**
@@ -64,7 +63,9 @@ export interface DueDateSuggestion {
  * considered and rejected as overkill for suggesting a single task's due date; see the implementation plan's
  * risk notes).
  *
- * Walks forward weekday by weekday, starting tomorrow (skipping Saturday/Sunday: see isWeekend), and returns
+ * Only working time counts as capacity: free time and sleep outside the configured working hours are never
+ * scheduled into. Walks forward working day by working day, starting tomorrow (skipping days with no working
+ * time), and returns
  * the first day with both enough free time (>= estimatedHours within working hours, after subtracting
  * overlapping events) and a manageable existing task load (< MAX_TASKS_PER_DAY tasks already due that day).
  * If no day within the search window satisfies both, the last day searched is returned anyway (with its own,
@@ -72,20 +73,21 @@ export interface DueDateSuggestion {
  * and the confirmation flow (request_confirmation) still lets the user reject it.
  */
 export function suggestDueDate(input: SuggestDueDateInput): DueDateSuggestion {
-  const dailyCapacity = WORKING_HOURS_END - WORKING_HOURS_START;
-  // An estimate larger than a single day's working hours can never be satisfied by any one day in this
-  // model (it only ever schedules onto a single candidate day), so it would otherwise always fall through to
-  // the last searched day regardless of how free that day actually is. Clamping to the daily capacity instead
+  const workingHours = input.workingHours ?? DEFAULT_WORKING_HOURS;
+  // An estimate larger than the longest working day can never be satisfied by any one day in this model (it
+  // only ever schedules onto a single candidate day), so it would otherwise always fall through to the last
+  // searched day regardless of how free that day actually is. Clamping to the longest day's capacity instead
   // picks the first day that is as free as a day can be, which is the closest useful approximation.
-  const estimatedHours = Math.min(input.estimatedHours ?? DEFAULT_ESTIMATED_HOURS, dailyCapacity);
+  const maxDailyCapacity = Math.max(...workingHours.map(capacityHours));
+  const estimatedHours = Math.min(input.estimatedHours ?? DEFAULT_ESTIMATED_HOURS, maxDailyCapacity);
   const searchDays = input.searchDays ?? DEFAULT_SEARCH_DAYS;
   const today = startOfDay(input.now);
 
   let lastCandidate: DueDateSuggestion | undefined;
-  for (const date of candidateWeekdays(today, searchDays)) {
+  for (const date of candidateDays(today, searchDays, workingHours)) {
     const candidate: DueDateSuggestion = {
       date,
-      freeHours: freeHoursOn(date, input.events),
+      freeHours: freeHoursOn(date, workingHours[date.getDay()]!, input.events),
       tasksDueThatDay: tasksDueOn(date, input.tasks),
     };
     if (candidate.freeHours >= estimatedHours && candidate.tasksDueThatDay < MAX_TASKS_PER_DAY) {
@@ -94,64 +96,68 @@ export function suggestDueDate(input: SuggestDueDateInput): DueDateSuggestion {
     lastCandidate = candidate;
   }
   // lastCandidate is always set here, since callers always pass a positive searchDays (the tool layer
-  // enforces this via zod) and candidateWeekdays always yields at least that many days, so the loop above
+  // enforces this via zod) and candidateDays always yields at least that many days, so the loop above
   // runs at least once.
   return lastCandidate!;
 }
 
 /**
  * Computes the calendar-day range suggestDueDate can possibly draw a candidate from, for `searchDays`
- * weekdays ahead of `now`, so callers that fetch calendar events/tasks to pass in (task_tools.ts's
+ * working days ahead of `now`, so callers that fetch calendar events/tasks to pass in (task_tools.ts's
  * suggest_due_date) can bound that fetch to exactly the days this module can use, instead of pulling a
  * user's entire event/task history.
  * @returns `start`: local midnight of tomorrow, the earliest day a candidate can fall on. `end`: local
- * midnight of the day after the last candidate weekday (exclusive), matching ListEventsParams.to /
+ * midnight of the day after the last candidate working day (exclusive), matching ListEventsParams.to /
  * ListTasksParams.dueBefore's exclusive-upper-bound semantics.
  */
-export function computeSearchRange(now: Date, searchDays: number = DEFAULT_SEARCH_DAYS): { start: Date; end: Date } {
+export function computeSearchRange(
+  now: Date,
+  searchDays: number = DEFAULT_SEARCH_DAYS,
+  workingHours: WorkingHours = DEFAULT_WORKING_HOURS,
+): { start: Date; end: Date } {
   const today = startOfDay(now);
-  const weekdays = candidateWeekdays(today, searchDays);
-  // weekdays always has at least one entry for a positive searchDays (the tool layer enforces this via
-  // zod, mirroring suggestDueDate's own lastCandidate! below), so this is never empty in practice.
-  const lastDay = weekdays[weekdays.length - 1]!;
+  const days = candidateDays(today, searchDays, workingHours);
+  // days always has at least one entry for a positive searchDays (the tool layer enforces this via zod,
+  // mirroring suggestDueDate's own lastCandidate! above), so this is never empty in practice.
+  const lastDay = days[days.length - 1]!;
   return { start: addDays(today, 1), end: addDays(lastDay, 1) };
 }
 
 /**
- * Returns the next `count` weekday (Mon-Fri) candidate days after `today`, in order, skipping weekends.
+ * Returns the next `count` days after `today` that have working time, in order, skipping days off.
  * Shared by suggestDueDate (to evaluate each candidate) and computeSearchRange (to bound the calendar/task
  * fetch to precisely the days suggestDueDate can return), so the two stay in lockstep.
+ * Days off are excluded outright: suggesting one would imply working outside the configured working hours.
  */
-function candidateWeekdays(today: Date, count: number): Date[] {
+function candidateDays(today: Date, count: number, workingHours: WorkingHours): Date[] {
+  if (workingHours.every((ranges) => ranges.length === 0)) {
+    // parseScheduleConfig already rejects this; guarded here too because the loop below would never end.
+    throw new Error("workingHours has no working time on any weekday");
+  }
   const days: Date[] = [];
   for (let offset = 1; days.length < count; offset++) {
     const date = addDays(today, offset);
-    if (!isWeekend(date)) days.push(date);
+    if (workingHours[date.getDay()]!.length > 0) days.push(date);
   }
   return days;
 }
 
 /**
- * True when `day` (a local-midnight date) falls on a Saturday or Sunday.
- * Weekend days are excluded from due-date candidates: this model only accounts for a Mon-Fri working week
- * (WORKING_HOURS_START/END), so suggesting a weekend date would imply working outside it.
+ * Total working hours in one weekday's ranges, ignoring calendar events.
  */
-function isWeekend(day: Date): boolean {
-  const weekday = day.getDay();
-  return weekday === 0 || weekday === 6;
+function capacityHours(ranges: readonly WorkingRange[]): number {
+  return ranges.reduce((sum, r) => sum + (r.endMinutes - r.startMinutes), 0) / 60;
 }
 
 /**
- * Computes free hours within working hours on `day`, after subtracting time overlapping `events`.
+ * Computes free hours within `ranges` (the day's working time) on `day`, after subtracting time covered by
+ * `events`. Events are merged into disjoint busy intervals first, so overlapping events (e.g. the same meeting
+ * on two calendars) are not subtracted twice.
  * An all-day event spanning `day` blocks the entire working day, on the assumption that a full-day
  * commitment (e.g. travel) leaves no realistic capacity for other work that day.
  */
-function freeHoursOn(day: Date, events: CalendarEvent[]): number {
-  const dayStart = atHour(day, WORKING_HOURS_START);
-  const dayEnd = atHour(day, WORKING_HOURS_END);
-  const totalMs = dayEnd.getTime() - dayStart.getTime();
-
-  let busyMs = 0;
+function freeHoursOn(day: Date, ranges: readonly WorkingRange[], events: CalendarEvent[]): number {
+  const timed: Array<[number, number]> = [];
   for (const event of events) {
     if (event.allDay) {
       if (day.getTime() >= event.start.getTime() && day.getTime() < event.end.getTime()) {
@@ -159,11 +165,40 @@ function freeHoursOn(day: Date, events: CalendarEvent[]): number {
       }
       continue;
     }
-    const overlapStart = Math.max(event.start.getTime(), dayStart.getTime());
-    const overlapEnd = Math.min(event.end.getTime(), dayEnd.getTime());
-    if (overlapEnd > overlapStart) busyMs += overlapEnd - overlapStart;
+    timed.push([event.start.getTime(), event.end.getTime()]);
   }
-  return Math.max(totalMs - busyMs, 0) / (60 * 60 * 1000);
+  const busy = mergeIntervals(timed);
+
+  let freeMs = 0;
+  for (const range of ranges) {
+    const rangeStart = atMinutes(day, range.startMinutes).getTime();
+    const rangeEnd = atMinutes(day, range.endMinutes).getTime();
+    let busyMs = 0;
+    for (const [busyStart, busyEnd] of busy) {
+      const overlapStart = Math.max(busyStart, rangeStart);
+      const overlapEnd = Math.min(busyEnd, rangeEnd);
+      if (overlapEnd > overlapStart) busyMs += overlapEnd - overlapStart;
+    }
+    freeMs += rangeEnd - rangeStart - busyMs;
+  }
+  return freeMs / MS_PER_HOUR;
+}
+
+/**
+ * Merges [start, end) millisecond intervals into sorted, disjoint intervals.
+ */
+function mergeIntervals(intervals: Array<[number, number]>): Array<[number, number]> {
+  const sorted = intervals.filter(([s, e]) => e > s).sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1]) {
+      last[1] = Math.max(last[1], end);
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  return merged;
 }
 
 /**
@@ -189,10 +224,12 @@ function addDays(date: Date, days: number): Date {
 }
 
 /**
- * Returns `day` (a local-midnight date) at the given local hour.
+ * Returns `day` (a local-midnight date) at the given number of minutes past local midnight.
+ * Built from calendar fields rather than adding milliseconds, so DST transition days still land on the
+ * intended wall-clock time.
  */
-function atHour(day: Date, hour: number): Date {
-  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour);
+function atMinutes(day: Date, minutes: number): Date {
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, minutes);
 }
 
 /**

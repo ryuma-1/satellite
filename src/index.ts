@@ -1,6 +1,7 @@
 import { DEFAULT_CALENDAR_ID, GoogleCalendarAdapter } from "./adapters/google-calendar/adapter";
 import { DEFAULT_TASK_LIST_ID, GoogleTasksAdapter } from "./adapters/google-tasks/adapter";
 import { loadGoogleConfig, loadOAuthClient } from "./config/google_config";
+import { loadScheduleConfig } from "./config/schedule_config";
 import { GwsProcessRunner } from "./gws/runner";
 import { createModel } from "./llm/model";
 import { runAgent } from "./planning/agent";
@@ -35,6 +36,7 @@ async function main() {
   const model = createModel();
   const config = await loadGoogleConfig();
   const oauthClient = await loadOAuthClient(config.oauthClientFile);
+  const schedule = await loadScheduleConfig();
   const runner = new GwsProcessRunner({ gwsCommand: config.gwsCommand, oauthClient });
 
   const accountNames = config.accounts.map((a) => a.name);
@@ -49,7 +51,7 @@ async function main() {
 
   const tools = {
     ...createCalendarTools(calendar, accountNames, calendarIds),
-    ...createTaskTools(tasks, accountTaskLists, calendar),
+    ...createTaskTools(tasks, accountTaskLists, calendar, { workingHours: schedule.workingHours }),
     ...createConfirmationTools(),
   };
 

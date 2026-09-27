@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { CalendarEvent } from "../services/calendar";
 import type { Task } from "../services/tasks";
-import {
-  MAX_TASKS_PER_DAY,
-  WORKING_HOURS_END,
-  WORKING_HOURS_START,
-  computeSearchRange,
-  suggestDueDate,
-} from "./due_date_suggestion";
+import type { WorkingHours } from "../config/schedule_config";
+import { MAX_TASKS_PER_DAY, computeSearchRange, suggestDueDate } from "./due_date_suggestion";
+
+/** Start hour of DEFAULT_WORKING_HOURS' weekday block, used when a test does not pass its own workingHours. */
+const WORKING_HOURS_START = 9;
+
+/** End hour of DEFAULT_WORKING_HOURS' weekday block, used when a test does not pass its own workingHours. */
+const WORKING_HOURS_END = 18;
 
 /** Fixed "now" used across tests: Friday 2026-09-25, 09:00. */
 const now = new Date(2026, 8, 25, 9, 0, 0);
@@ -153,6 +154,65 @@ describe("suggestDueDate", () => {
   });
 });
 
+/** Builds a WorkingRange from whole local hours. */
+function hours(start: number, end: number) {
+  return { startMinutes: start * 60, endMinutes: end * 60 };
+}
+
+/** Mon-Fri 09:00-18:00 with Sat/Sun off, matching DEFAULT_WORKING_HOURS; tests override single days from it. */
+const weekdays9to18: WorkingHours = [[], [hours(9, 18)], [hours(9, 18)], [hours(9, 18)], [hours(9, 18)], [hours(9, 18)], []];
+
+/** Returns weekdays9to18 with the given Date#getDay() index replaced by `ranges`. */
+function withDay(day: number, ranges: ReturnType<typeof hours>[]): WorkingHours {
+  return weekdays9to18.map((r, i) => (i === day ? ranges : r));
+}
+
+describe("suggestDueDate with custom working hours", () => {
+  test("does not double-count overlapping events", () => {
+    // 10-12 and 11-13 together cover 3 hours (10-13), not 4.
+    const events = [timedEvent(firstCandidate, 10, 12), timedEvent(firstCandidate, 11, 13)];
+    const result = suggestDueDate({ now, events, tasks: [] });
+    expect(result.freeHours).toBe(WORKING_HOURS_END - WORKING_HOURS_START - 3);
+  });
+
+  test("only counts time inside the day's working ranges, so an event in a break costs nothing", () => {
+    const workingHours = withDay(1, [hours(9, 12), hours(13, 18)]);
+    const events = [timedEvent(firstCandidate, 12, 13)];
+    const result = suggestDueDate({ now, events, tasks: [], workingHours });
+    expect(result).toEqual({ date: firstCandidate, freeHours: 8, tasksDueThatDay: 0 });
+  });
+
+  test("an event spanning a break only subtracts its working-time portions", () => {
+    const workingHours = withDay(1, [hours(9, 12), hours(13, 18)]);
+    const events = [timedEvent(firstCandidate, 11, 14)];
+    const result = suggestDueDate({ now, events, tasks: [], workingHours });
+    expect(result.freeHours).toBe(6);
+  });
+
+  test("suggests a Saturday when Saturday has working time", () => {
+    const saturday = new Date(2026, 8, 26);
+    const result = suggestDueDate({ now, events: [], tasks: [], workingHours: withDay(6, [hours(10, 12)]) });
+    expect(result).toEqual({ date: saturday, freeHours: 2, tasksDueThatDay: 0 });
+  });
+
+  test("skips a weekday configured with no working time", () => {
+    const result = suggestDueDate({ now, events: [], tasks: [], workingHours: withDay(1, []) });
+    expect(result.date).toEqual(secondCandidate);
+  });
+
+  test("clamps an oversized estimate to the longest configured day", () => {
+    // Only Saturday 10-12 is working time, so a 5-hour estimate is clamped to 2 hours and still fits there.
+    const onlySaturday: WorkingHours = [[], [], [], [], [], [], [hours(10, 12)]];
+    const result = suggestDueDate({ now, events: [], tasks: [], estimatedHours: 5, workingHours: onlySaturday });
+    expect(result.date).toEqual(new Date(2026, 8, 26));
+  });
+
+  test("throws instead of looping forever when no day has working time", () => {
+    const none: WorkingHours = [[], [], [], [], [], [], []];
+    expect(() => suggestDueDate({ now, events: [], tasks: [], workingHours: none })).toThrow(/no working time/);
+  });
+});
+
 describe("computeSearchRange", () => {
   test("starts tomorrow and ends the day after the last candidate weekday", () => {
     const range = computeSearchRange(now, 1);
@@ -164,5 +224,12 @@ describe("computeSearchRange", () => {
     const longRange = computeSearchRange(now, 5);
     expect(longRange.start).toEqual(shortRange.start);
     expect(longRange.end.getTime()).toBeGreaterThan(shortRange.end.getTime());
+  });
+
+  test("follows custom working hours when choosing the last candidate day", () => {
+    // Only Wednesdays have working time, so the single candidate is Wednesday 2026-09-30.
+    const onlyWednesday: WorkingHours = [[], [], [], [hours(9, 18)], [], [], []];
+    const range = computeSearchRange(now, 1, onlyWednesday);
+    expect(range).toEqual({ start: new Date(2026, 8, 26), end: new Date(2026, 9, 1) });
   });
 });
