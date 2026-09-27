@@ -28,6 +28,17 @@ function toolCallStep(): LanguageModelV4StreamResult {
 }
 
 /**
+ * A model step that calls a tool named `create_task` once, to exercise runAgent's built-in write-confirmation
+ * guard (see the "guards write tools" tests below).
+ */
+function createTaskStep(): LanguageModelV4StreamResult {
+  return streamOf([
+    { type: "tool-call", toolCallId: "call1", toolName: "create_task", input: JSON.stringify({ title: "Write report" }) },
+    { type: "finish", usage, finishReason: { unified: "tool-calls", raw: undefined } },
+  ]);
+}
+
+/**
  * A model step that answers with text.
  */
 function textStep(text: string): LanguageModelV4StreamResult {
@@ -113,5 +124,47 @@ describe("runAgent", () => {
     };
     await collect(runAgent({ model, tools, instructions: "sys", prompt: "q", maxSteps: 2 }));
     expect(model.doStreamCalls).toHaveLength(2);
+  });
+
+  describe("guards write tools regardless of the caller's own wiring", () => {
+    test("runs the guarded tool's execute when confirm approves", async () => {
+      const received: unknown[] = [];
+      const model = new MockLanguageModelV4({ doStream: [createTaskStep(), textStep("done")] });
+      const tools = {
+        create_task: tool({
+          inputSchema: z.object({ title: z.string() }),
+          execute: async (input) => {
+            received.push(input);
+            return { id: "created1" };
+          },
+        }),
+      };
+
+      const text = await collect(runAgent({ model, tools, instructions: "sys", prompt: "q", confirm: () => true }));
+
+      expect(text).toBe("done");
+      expect(received).toEqual([{ title: "Write report" }]);
+    });
+
+    test("never runs the guarded tool's execute when confirm rejects, even though the caller passed the raw tool", async () => {
+      const received: unknown[] = [];
+      const model = new MockLanguageModelV4({ doStream: [createTaskStep(), textStep("cancelled")] });
+      const tools = {
+        create_task: tool({
+          inputSchema: z.object({ title: z.string() }),
+          execute: async (input) => {
+            received.push(input);
+            return { id: "created1" };
+          },
+        }),
+      };
+
+      const text = await collect(runAgent({ model, tools, instructions: "sys", prompt: "q", confirm: () => false }));
+
+      expect(text).toBe("cancelled");
+      expect(received).toEqual([]);
+      // The tool result the model saw in its next step must reflect the rejection, not a fabricated success.
+      expect(JSON.stringify(model.doStreamCalls[1]?.prompt)).toContain('"confirmed":false');
+    });
   });
 });

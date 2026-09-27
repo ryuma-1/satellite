@@ -83,26 +83,21 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("利用できるタスクリスト: personal: @default，school: @default");
   });
 
-  test("adds task creation workflow guidance covering duplicate-checking, due-date suggestion and confirmation", () => {
+  test("lists every Skill's name/description and tells the model to load_skill before following it", () => {
     const prompt = buildSystemPrompt({
       now,
       accounts: [],
-      accountTaskLists: [{ name: "acct", taskListIds: ["@default"] }],
+      skills: [{ name: "task-creation", description: "タスク作成を依頼されたときに使用する" }],
       timeZone: "Asia/Tokyo",
     });
-    expect(prompt).toContain("list_tasks");
-    expect(prompt).toContain("suggest_due_date");
-    expect(prompt).toContain("request_confirmation");
-    expect(prompt).toContain("create_task");
-    expect(prompt).toContain("approved: false");
-    expect(prompt).toContain("estimatedHours");
-    expect(prompt).toContain("fits: false");
+    expect(prompt).toContain("load_skill");
+    expect(prompt).toContain("task-creation: タスク作成を依頼されたときに使用する");
   });
 
-  test("omits task creation workflow guidance when tasks are not configured", () => {
+  test("omits the Skill list when no skills are discovered", () => {
     const prompt = buildSystemPrompt({ now, accounts: [], timeZone: "Asia/Tokyo" });
-    expect(prompt).not.toContain("request_confirmation");
-    expect(prompt).not.toContain("create_task");
+    expect(prompt).not.toContain("load_skill");
+    expect(prompt).not.toContain("Skill");
   });
 });
 

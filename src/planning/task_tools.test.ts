@@ -11,7 +11,7 @@ import type {
 } from "../services/calendar";
 import type { ListTasksParams, NewTask, Task, TaskService } from "../services/tasks";
 import { formatLocalDateTime } from "./datetime";
-import { computeSearchRange } from "./due_date_suggestion";
+import { computeFreeSlotRange } from "./due_date_suggestion";
 import { createTaskTools, resolveAccountTaskLists, toTaskView } from "./task_tools";
 
 /**
@@ -41,7 +41,7 @@ class FakeTaskService implements TaskService {
 
 /**
  * Records listEvents calls and replies with fixed events; the other CalendarService methods are unused by
- * task_tools (only suggest_due_date reads from a CalendarService, via listEvents).
+ * task_tools (only find_free_slot reads from a CalendarService, via listEvents).
  */
 class FakeCalendarService implements CalendarService {
   /** Every call made to this fake, in order. */
@@ -74,7 +74,7 @@ class FakeCalendarService implements CalendarService {
   }
 }
 
-/** A CalendarService fake with no events, for tests that don't exercise suggest_due_date's calendar reading. */
+/** A CalendarService fake with no events, for tests that don't exercise find_free_slot's calendar reading. */
 const noEvents = new FakeCalendarService([]);
 
 /** An open (not completed) task with a due date and notes, shared across the tests below. */
@@ -313,30 +313,55 @@ describe("createTaskTools", () => {
     });
   });
 
-  describe("suggest_due_date", () => {
-    test("bounds the calendar/task fetch to the search window and suggests a due date from it", async () => {
+  describe("check_task_draft", () => {
+    test("passes the draft through to checkTaskDraft and returns its result", async () => {
+      const service = new FakeTaskService([]);
+      const tools = createTaskTools(service, defaultOnly, noEvents);
+
+      const complete = await run(tools, "check_task_draft", {
+        title: "Write report",
+        estimatedHours: 2,
+        deadline: "2026-10-01",
+      });
+      expect(complete).toEqual({ complete: true, missing: [] });
+
+      const incomplete = await run(tools, "check_task_draft", { title: "Write report" });
+      expect(incomplete).toEqual({ complete: false, missing: ["estimatedHours", "deadline"] });
+    });
+  });
+
+  describe("find_free_slot", () => {
+    test("bounds the calendar/task fetch to the deadline window and suggests a slot from it", async () => {
       const service = new FakeTaskService([]);
       const calendar = new FakeCalendarService([]);
       const fixedNow = new Date(2026, 8, 25, 9, 0, 0);
       const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow });
 
-      const result = await run(tools, "suggest_due_date", {});
+      const result = await run(tools, "find_free_slot", { deadline: "2026-10-09" });
 
-      // Fetches exactly the range suggestDueDate can draw a candidate from (see computeSearchRange),
+      // Fetches exactly the range findFreeSlot can draw a candidate from (see computeFreeSlotRange),
       // instead of an unbounded fetch of a user's entire event/task history.
-      const range = computeSearchRange(fixedNow);
+      const range = computeFreeSlotRange(fixedNow, new Date(2026, 9, 9));
       expect(calendar.calls).toEqual([{ method: "listEvents", args: [{ from: range.start, to: range.end }] }]);
       const taskCall = service.calls.find((c) => c.method === "listTasks");
       expect(taskCall?.args[0]).toEqual({ dueAfter: range.start, dueBefore: range.end, completed: false });
       // 2026-09-25 is a Friday, so tomorrow (Sat 9/26) and Sun 9/27 are skipped; the first candidate weekday
       // is Monday 2026-09-28.
-      expect(result).toEqual({ due: "2026-09-28", freeHours: 9, tasksDueThatDay: 0, taskHours: 0, remainingHours: 9, fits: true });
+      expect(result).toEqual({
+        date: "2026-09-28",
+        slotStart: formatLocalDateTime(new Date(2026, 8, 28, 9, 0, 0)),
+        freeHours: 9,
+        tasksDueThatDay: 0,
+        taskHours: 0,
+        remainingHours: 9,
+        fits: true,
+      });
     });
 
-    test("forwards estimatedHours/searchDays to the underlying calculation", async () => {
+    test("forwards estimatedHours to the underlying calculation, and a tight deadline exercises the fallback", async () => {
       const service = new FakeTaskService([]);
-      // Monday 2026-09-28, the first weekday candidate, is fully booked; with searchDays: 1 there is no
-      // further candidate to fall back to within the window, so this also exercises that fallback path.
+      // Monday 2026-09-28, the first weekday candidate, is fully booked; with the deadline bounded to that
+      // same day there is no further candidate to fall back to, so this also exercises that fallback path.
       const busyEvents: CalendarEvent[] = [
         {
           id: "e1",
@@ -350,16 +375,17 @@ describe("createTaskTools", () => {
       const fixedNow = new Date(2026, 8, 25, 9, 0, 0);
       const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow });
 
-      const result = await run(tools, "suggest_due_date", { estimatedHours: 1, searchDays: 1 });
+      const result = await run(tools, "find_free_slot", { deadline: "2026-09-28", estimatedHours: 1 });
 
-      // searchDays: 1 is reflected both in the fetched range (narrower than the 14-day default)...
-      const range = computeSearchRange(fixedNow, 1);
-      const defaultRange = computeSearchRange(fixedNow);
+      // A deadline bounded to a single candidate day is reflected in the fetched range (narrower than a
+      // distant deadline would produce)...
+      const range = computeFreeSlotRange(fixedNow, new Date(2026, 8, 28));
+      const distantRange = computeFreeSlotRange(fixedNow, new Date(2026, 9, 9));
       expect(calendar.calls).toEqual([{ method: "listEvents", args: [{ from: range.start, to: range.end }] }]);
-      expect(range.end.getTime()).toBeLessThan(defaultRange.end.getTime());
-      // ...and in the result: with only one (fully booked) candidate day in range, it is returned as the
-      // fallback rather than searching further into the default 14-day window.
-      expect(result).toEqual({ due: "2026-09-28", freeHours: 0, tasksDueThatDay: 0, taskHours: 0, remainingHours: 0, fits: false });
+      expect(range.end.getTime()).toBeLessThan(distantRange.end.getTime());
+      // ...and in the result: with only one (fully booked) candidate day up to the deadline, it is returned
+      // as the fallback rather than searching further.
+      expect(result).toMatchObject({ date: "2026-09-28", freeHours: 0, tasksDueThatDay: 0, taskHours: 0, remainingHours: 0, fits: false });
     });
 
     test("schedules into the configured workingHours, for both the fetch window and the result", async () => {
@@ -370,11 +396,60 @@ describe("createTaskTools", () => {
       const onlySaturday: WorkingHours = [[], [], [], [], [], [], [{ startMinutes: 600, endMinutes: 720 }]];
       const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow, workingHours: onlySaturday });
 
-      const result = await run(tools, "suggest_due_date", { searchDays: 1 });
+      const result = await run(tools, "find_free_slot", { deadline: "2026-09-26" });
 
-      const range = computeSearchRange(fixedNow, 1, onlySaturday);
+      const range = computeFreeSlotRange(fixedNow, new Date(2026, 8, 26));
       expect(calendar.calls).toEqual([{ method: "listEvents", args: [{ from: range.start, to: range.end }] }]);
-      expect(result).toEqual({ due: "2026-09-26", freeHours: 2, tasksDueThatDay: 0, taskHours: 0, remainingHours: 2, fits: true });
+      expect(result).toEqual({
+        date: "2026-09-26",
+        slotStart: formatLocalDateTime(new Date(2026, 8, 26, 10, 0, 0)),
+        freeHours: 2,
+        tasksDueThatDay: 0,
+        taskHours: 0,
+        remainingHours: 2,
+        fits: true,
+      });
+    });
+
+    test("rejects a deadline of today without fetching tasks/events (no candidate day exists)", async () => {
+      const service = new FakeTaskService([]);
+      const calendar = new FakeCalendarService([]);
+      const fixedNow = new Date(2026, 8, 25, 9, 0, 0);
+      const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow });
+
+      await expect(run(tools, "find_free_slot", { deadline: "2026-09-25" })).rejects.toThrow(
+        /no working day between tomorrow and the deadline/,
+      );
+      expect(service.calls).toEqual([]);
+      expect(calendar.calls).toEqual([]);
+    });
+
+    test("rejects a deadline in the past without fetching tasks/events", async () => {
+      const service = new FakeTaskService([]);
+      const calendar = new FakeCalendarService([]);
+      const fixedNow = new Date(2026, 8, 25, 9, 0, 0);
+      const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow });
+
+      await expect(run(tools, "find_free_slot", { deadline: "2026-09-20" })).rejects.toThrow(
+        /no working day between tomorrow and the deadline/,
+      );
+      expect(service.calls).toEqual([]);
+      expect(calendar.calls).toEqual([]);
+    });
+
+    test("rejects a deadline range that contains no working day at all, without fetching tasks/events", async () => {
+      const service = new FakeTaskService([]);
+      const calendar = new FakeCalendarService([]);
+      const fixedNow = new Date(2026, 8, 25, 9, 0, 0);
+      // No weekday has any working time, so even a distant deadline has zero candidate days.
+      const noWorkingDays: WorkingHours = [[], [], [], [], [], [], []];
+      const tools = createTaskTools(service, defaultOnly, calendar, { now: () => fixedNow, workingHours: noWorkingDays });
+
+      await expect(run(tools, "find_free_slot", { deadline: "2026-10-09" })).rejects.toThrow(
+        /no working day between tomorrow and the deadline/,
+      );
+      expect(service.calls).toEqual([]);
+      expect(calendar.calls).toEqual([]);
     });
   });
 });

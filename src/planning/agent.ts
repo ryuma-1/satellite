@@ -1,4 +1,5 @@
 import { isStepCount, streamText, type LanguageModel, type ToolSet } from "ai";
+import { type ConfirmFn, withWriteConfirmation } from "./write_confirmation_hook";
 
 /**
  * Inputs for one question-answer run of the agent.
@@ -19,6 +20,15 @@ export interface RunAgentOptions {
    * so this is for visibility rather than control flow.
    */
   onToolError?: (toolName: string, error: unknown) => void;
+  /**
+   * Tool names withWriteConfirmation should guard before `tools` reaches streamText; defaults to
+   * DEFAULT_GUARDED_TOOLS. Overriding this here, rather than requiring every caller to wrap `tools` itself,
+   * is what makes the confirmation structurally unavoidable regardless of how the model calls a write tool
+   * (issue #9).
+   */
+  guardedToolNames?: readonly string[];
+  /** Confirmation function passed to withWriteConfirmation; defaults to promptConfirm. */
+  confirm?: ConfirmFn;
 }
 
 /**
@@ -29,7 +39,9 @@ export interface RunAgentOptions {
 export async function* runAgent(options: RunAgentOptions): AsyncGenerator<string> {
   const result = streamText({
     model: options.model,
-    tools: options.tools,
+    // Wrapped here, not by each caller, so a write tool cannot reach streamText unconfirmed regardless of
+    // how index.ts (or a future caller) assembles `tools` (issue #9's "LLMがどう呼んでもスキップできない").
+    tools: withWriteConfirmation(options.tools, { toolNames: options.guardedToolNames, confirm: options.confirm }),
     instructions: options.instructions,
     prompt: options.prompt,
     stopWhen: isStepCount(options.maxSteps ?? 10),
